@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Проверка данных чека{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-1"><i class="bi bi-pencil-square text-primary me-2"></i>Проверка распознанных данных</h4>
+<p class="text-muted mb-4">Проверьте и при необходимости исправьте данные перед сохранением.</p>
+
+<div class="row g-4">
+    <!-- Форма -->
+    <div class="col-lg-8">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-4">
+                <form method="POST" action="{{ url_for('save') }}" id="reviewForm">
+
+                    <!-- Файл -->
+                    <div class="alert alert-secondary py-2 mb-4 small">
+                        <i class="bi bi-file-earmark me-1"></i>
+                        Файл: <strong>{{ data.original_filename or 'без имени' }}</strong>
+                    </div>
+
+                    <div class="row g-3">
+                        <!-- Дата отправки -->
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold">
+                                Дата отправки <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" name="date_send" class="form-control"
+                                   value="{{ data.date_send }}"
+                                   placeholder="ДД.ММ.ГГГГ"
+                                   pattern="\d{2}\.\d{2}\.\d{4}"
+                                   title="Формат: ДД.ММ.ГГГГ">
+                            <div class="form-text">Пример: 22.01.2026</div>
+                        </div>
+
+                        <!-- РПО -->
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold">
+                                РПО письма <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" name="rpo" class="form-control font-monospace"
+                                   value="{{ data.rpo }}"
+                                   placeholder="14-значный номер"
+                                   inputmode="numeric">
+                            <div class="form-text">Трек-номер с чека (только цифры)</div>
+                        </div>
+
+                        <!-- Кто отправил -->
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold">Кто отправил</label>
+                            <input type="text" name="sender" class="form-control"
+                                   value="{{ data.sender }}"
+                                   placeholder="ФИО или название организации">
+                        </div>
+
+                        <!-- Кому отправил -->
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold">Кому отправил</label>
+                            <input type="text" name="recipient" class="form-control"
+                                   value="{{ data.recipient }}"
+                                   placeholder="ФИО или название организации">
+                        </div>
+
+                        <!-- Сумма -->
+                        <div class="col-sm-4">
+                            <label class="form-label fw-semibold">
+                                Сумма (руб.) <span class="text-danger">*</span>
+                            </label>
+                            <div class="input-group">
+                                <input type="text" name="amount" class="form-control text-end"
+                                       value="{{ data.amount }}"
+                                       placeholder="0.00"
+                                       inputmode="decimal">
+                                <span class="input-group-text">₽</span>
+                            </div>
+                        </div>
+
+                        <!-- Проект -->
+                        <div class="col-sm-8">
+                            <label class="form-label fw-semibold">
+                                Наименование проекта <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" name="project" class="form-control"
+                                   value="{{ data.project }}"
+                                   placeholder="Введите или выберите из списка"
+                                   list="projectsList"
+                                   id="projectInput">
+                            <datalist id="projectsList">
+                                {% for p in projects %}
+                                    <option value="{{ p }}">
+                                {% endfor %}
+                            </datalist>
+                            <div class="form-text">Если проект новый — просто введите его название</div>
+                        </div>
+
+                        <!-- Комментарий -->
+                        <div class="col-12">
+                            <label class="form-label fw-semibold">Комментарий</label>
+                            <textarea name="comment" class="form-control" rows="2"
+                                      placeholder="Дополнительная информация (необязательно)">{{ data.comment }}</textarea>
+                        </div>
+                    </div>
+
+                    <hr class="my-4">
+
+                    <div class="d-flex gap-2 flex-wrap">
+                        <button type="submit" class="btn btn-success px-4">
+                            <i class="bi bi-check-circle me-2"></i>Подтвердить и сохранить
+                        </button>
+                        <form method="POST" action="{{ url_for('cancel_upload') }}" class="d-inline">
+                            <button type="submit" class="btn btn-outline-danger"
+                                    onclick="return confirm('Отменить загрузку? Файл будет удалён из временной папки.')">
+                                <i class="bi bi-x-circle me-1"></i>Отменить
+                            </button>
+                        </form>
+                    </div>
+
+                    <p class="text-muted small mt-3 mb-0">
+                        <span class="text-danger">*</span> — обязательные поля
+                    </p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Боковая панель -->
+    <div class="col-lg-4">
+        <!-- Что будет с файлом -->
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-body">
+                <h6 class="fw-semibold mb-2"><i class="bi bi-folder-symlink me-2 text-primary"></i>Куда сохранится файл</h6>
+                <div class="bg-light rounded p-2 font-monospace small text-break" id="filePathPreview">
+                    Заполните поля — путь появится здесь
+                </div>
+            </div>
+        </div>
+
+        <!-- Подсказки -->
+        <div class="card border-0 shadow-sm">
+            <div class="card-body">
+                <h6 class="fw-semibold mb-2"><i class="bi bi-question-circle me-2 text-info"></i>Подсказка</h6>
+                <ul class="small text-muted mb-0 ps-3">
+                    <li>РПО — трек-номер с чека, обычно 14 цифр</li>
+                    <li>Если поле пустое — программа не смогла распознать. Введите вручную.</li>
+                    <li>Проект — определяет папку, куда переместится файл</li>
+                    <li>После сохранения файл будет переименован и перемещён автоматически</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updatePathPreview() {
+    const date = document.querySelector('[name="date_send"]').value.trim();
+    const recipient = document.querySelector('[name="recipient"]').value.trim();
+    const project = document.querySelector('[name="project"]').value.trim();
+
+    let datePart = 'ГГГГММДД';
+    if (date.match(/^\d{2}\.\d{2}\.\d{4}$/)) {
+        const [d, m, y] = date.split('.');
+        datePart = y + m + d;
+    }
+
+    const recipientPart = recipient || 'Получатель';
+    const projectPart = project || 'Проект';
+
+    document.getElementById('filePathPreview').textContent =
+        `storage/${projectPart}/${datePart}_Отправка почты ${recipientPart}.pdf`;
+}
+
+['date_send', 'recipient', 'project'].forEach(name => {
+    document.querySelector(`[name="${name}"]`).addEventListener('input', updatePathPreview);
+});
+updatePathPreview();
+</script>
+{% endblock %}

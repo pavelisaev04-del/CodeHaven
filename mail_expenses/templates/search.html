@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Поиск расходов{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="bi bi-search text-primary me-2"></i>Поиск и фильтрация</h4>
+
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body">
+        <form method="GET" action="{{ url_for('search') }}" id="searchForm">
+            <div class="row g-3">
+                <!-- Период -->
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label fw-semibold small">Дата с</label>
+                    <input type="text" name="date_from" class="form-control"
+                           value="{{ filters.date_from }}" placeholder="ДД.ММ.ГГГГ">
+                </div>
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label fw-semibold small">Дата по</label>
+                    <input type="text" name="date_to" class="form-control"
+                           value="{{ filters.date_to }}" placeholder="ДД.ММ.ГГГГ">
+                </div>
+
+                <!-- РПО -->
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label fw-semibold small">РПО</label>
+                    <input type="text" name="rpo" class="form-control font-monospace"
+                           value="{{ filters.rpo }}" placeholder="Часть или полный номер">
+                </div>
+
+                <!-- Проект -->
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label fw-semibold small">Проект</label>
+                    <input type="text" name="project" class="form-control"
+                           value="{{ filters.project }}" placeholder="Название проекта"
+                           list="projectsList">
+                    <datalist id="projectsList">
+                        {% for p in projects %}
+                            <option value="{{ p }}">
+                        {% endfor %}
+                    </datalist>
+                </div>
+
+                <!-- Отправитель -->
+                <div class="col-sm-6">
+                    <label class="form-label fw-semibold small">Кто отправил</label>
+                    <input type="text" name="sender" class="form-control"
+                           value="{{ filters.sender }}" placeholder="ФИО или часть">
+                </div>
+
+                <!-- Получатель -->
+                <div class="col-sm-6">
+                    <label class="form-label fw-semibold small">Кому отправил</label>
+                    <input type="text" name="recipient" class="form-control"
+                           value="{{ filters.recipient }}" placeholder="ФИО или часть">
+                </div>
+            </div>
+
+            <div class="d-flex gap-2 mt-3 flex-wrap">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search me-2"></i>Найти
+                </button>
+                <a href="{{ url_for('search') }}" class="btn btn-outline-secondary">
+                    <i class="bi bi-x me-1"></i>Сбросить
+                </a>
+                {% if has_filters and records %}
+                <a href="{{ url_for('export') }}{% if filters.date_from or filters.date_to %}?{% endif %}
+                   {{- '&date_from=' + filters.date_from if filters.date_from else '' -}}
+                   {{- '&date_to=' + filters.date_to if filters.date_to else '' -}}
+                   {{- '&project=' + filters.project if filters.project else '' -}}"
+                   class="btn btn-outline-success ms-auto">
+                    <i class="bi bi-file-earmark-excel me-1"></i>Экспорт результата
+                </a>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Результаты -->
+{% if has_filters %}
+    {% if records %}
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+        <span class="text-muted small">
+            Найдено: <strong>{{ records|length }}</strong> записей,
+            сумма: <strong class="text-success">{{ "%.2f"|format(total_amount) }} ₽</strong>
+        </span>
+    </div>
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover table-sm mb-0 align-middle">
+                    <thead class="table-primary">
+                        <tr>
+                            <th class="ps-3">№</th>
+                            <th>Дата</th>
+                            <th>РПО</th>
+                            <th>Кто отправил</th>
+                            <th>Кому отправил</th>
+                            <th class="text-end">Сумма</th>
+                            <th>Проект</th>
+                            <th>Файл</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in records %}
+                        <tr>
+                            <td class="ps-3 text-muted small">{{ r.id }}</td>
+                            <td class="text-nowrap">{{ r.date_send }}</td>
+                            <td><code class="small">{{ r.rpo }}</code></td>
+                            <td>{{ r.sender or '—' }}</td>
+                            <td>{{ r.recipient or '—' }}</td>
+                            <td class="text-end text-nowrap fw-semibold">{{ "%.2f"|format(r.amount) }} ₽</td>
+                            <td>
+                                <span class="badge bg-secondary bg-opacity-75 fw-normal">
+                                    {{ r.project }}
+                                </span>
+                            </td>
+                            <td class="text-muted small">
+                                {% if r.file_path %}
+                                    <i class="bi bi-paperclip"></i>
+                                    {{ r.file_path.split('\\')[-1].split('/')[-1][:25] }}
+                                    {% if r.file_path.split('\\')[-1].split('/')[-1]|length > 25 %}…{% endif %}
+                                {% else %}—{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                    <tfoot class="table-light fw-semibold">
+                        <tr>
+                            <td colspan="5" class="ps-3">Итого</td>
+                            <td class="text-end text-success">{{ "%.2f"|format(total_amount) }} ₽</td>
+                            <td colspan="2"></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body text-center py-4 text-muted">
+            <i class="bi bi-search fs-2 d-block mb-2"></i>
+            Ничего не найдено по заданным фильтрам.
+        </div>
+    </div>
+    {% endif %}
+{% else %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-4 text-muted">
+        <i class="bi bi-funnel fs-2 d-block mb-2"></i>
+        Задайте фильтры выше и нажмите «Найти».
+    </div>
+</div>
+{% endif %}
+{% endblock %}

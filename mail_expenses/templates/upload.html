@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Добавить чек{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="bi bi-plus-circle-fill text-primary me-2"></i>Добавить чек</h4>
+
+<div class="row justify-content-center">
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-4">
+                <p class="text-muted mb-4">
+                    Загрузите фото или скан чека. Программа попробует распознать данные автоматически.
+                    Перед сохранением вы сможете проверить и исправить все поля.
+                </p>
+
+                <form method="POST" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="uploadForm">
+                    <!-- Зона загрузки файла -->
+                    <div class="upload-zone mb-4" id="dropZone">
+                        <input type="file" name="file" id="fileInput" class="d-none"
+                               accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp,.gif">
+                        <div class="upload-zone-inner text-center py-5 px-3" id="dropZoneInner">
+                            <i class="bi bi-cloud-upload fs-1 text-primary d-block mb-3"></i>
+                            <p class="fw-semibold mb-1">Перетащите файл сюда или нажмите для выбора</p>
+                            <p class="text-muted small mb-3">
+                                Поддерживаемые форматы: PDF, PNG, JPG, JPEG, TIFF, BMP
+                            </p>
+                            <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
+                                <i class="bi bi-folder2-open me-2"></i>Выбрать файл
+                            </button>
+                        </div>
+                        <!-- Превью выбранного файла -->
+                        <div id="filePreview" class="text-center py-4 px-3 d-none">
+                            <i class="bi bi-file-earmark-check fs-1 text-success d-block mb-2"></i>
+                            <p class="fw-semibold mb-0" id="fileName"></p>
+                            <p class="text-muted small" id="fileSize"></p>
+                            <button type="button" class="btn btn-sm btn-outline-secondary mt-2"
+                                    onclick="clearFile()">
+                                <i class="bi bi-x me-1"></i>Убрать файл
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info small py-2 mb-4">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Данные <strong>не сохраняются</strong> автоматически.
+                        После распознавания вы увидите форму проверки.
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary px-4" id="submitBtn" disabled>
+                            <i class="bi bi-eye me-2"></i>Распознать и проверить
+                        </button>
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Отмена</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Подсказка -->
+        <div class="card border-0 shadow-sm mt-3">
+            <div class="card-body py-3">
+                <h6 class="fw-semibold mb-2"><i class="bi bi-lightbulb me-2 text-warning"></i>Советы для лучшего распознавания</h6>
+                <ul class="small text-muted mb-0 ps-3">
+                    <li>Снимайте чек при хорошем освещении, без теней</li>
+                    <li>Убедитесь, что весь текст попал в кадр</li>
+                    <li>PDF-файл с электронным чеком распознаётся точнее фото</li>
+                    <li>Если распознавание ошиблось — все поля можно исправить вручную</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const fileInput = document.getElementById('fileInput');
+const dropZone = document.getElementById('dropZone');
+const dropZoneInner = document.getElementById('dropZoneInner');
+const filePreview = document.getElementById('filePreview');
+const fileNameEl = document.getElementById('fileName');
+const fileSizeEl = document.getElementById('fileSize');
+const submitBtn = document.getElementById('submitBtn');
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' Б';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' КБ';
+    return (bytes / 1024 / 1024).toFixed(1) + ' МБ';
+}
+
+function showFile(file) {
+    fileNameEl.textContent = file.name;
+    fileSizeEl.textContent = formatSize(file.size);
+    dropZoneInner.classList.add('d-none');
+    filePreview.classList.remove('d-none');
+    submitBtn.disabled = false;
+}
+
+function clearFile() {
+    fileInput.value = '';
+    dropZoneInner.classList.remove('d-none');
+    filePreview.classList.add('d-none');
+    submitBtn.disabled = true;
+}
+
+fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) showFile(fileInput.files[0]);
+});
+
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        fileInput.files = dt.files;
+        showFile(file);
+    }
+});
+
+// Показываем индикатор загрузки при отправке
+document.getElementById('uploadForm').addEventListener('submit', () => {
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Распознаю...';
+    submitBtn.disabled = true;
+});
+</script>
+{% endblock %}

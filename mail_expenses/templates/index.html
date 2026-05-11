@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Главная — Учёт почтовых расходов{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="bi bi-house-fill text-primary me-2"></i>Главная</h4>
+
+<!-- Статистика -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon bg-primary bg-opacity-10 text-primary rounded-3 p-3">
+                    <i class="bi bi-envelope-fill fs-3"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">Всего отправлений</div>
+                    <div class="fs-3 fw-bold text-primary">{{ total_count }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon bg-success bg-opacity-10 text-success rounded-3 p-3">
+                    <i class="bi bi-currency-exchange fs-3"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">Всего расходов</div>
+                    <div class="fs-3 fw-bold text-success">{{ "%.2f"|format(total_amount) }} ₽</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon bg-info bg-opacity-10 text-info rounded-3 p-3">
+                    <i class="bi bi-calendar-month fs-3"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">За этот месяц (писем)</div>
+                    <div class="fs-3 fw-bold text-info">{{ month_count }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon bg-warning bg-opacity-10 text-warning rounded-3 p-3">
+                    <i class="bi bi-wallet2 fs-3"></i>
+                </div>
+                <div>
+                    <div class="text-muted small">За этот месяц (сумма)</div>
+                    <div class="fs-3 fw-bold text-warning">{{ "%.2f"|format(month_amount) }} ₽</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Быстрые действия + статус OCR -->
+<div class="row g-3 mb-4">
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="card-title fw-semibold mb-3"><i class="bi bi-lightning-fill text-warning me-2"></i>Быстрые действия</h6>
+                <div class="d-grid gap-2">
+                    <a href="{{ url_for('upload') }}" class="btn btn-primary">
+                        <i class="bi bi-plus-circle me-2"></i>Добавить чек
+                    </a>
+                    <a href="{{ url_for('expenses') }}" class="btn btn-outline-secondary">
+                        <i class="bi bi-table me-2"></i>Все расходы
+                    </a>
+                    <a href="{{ url_for('reports') }}?year={{ current_year }}" class="btn btn-outline-secondary">
+                        <i class="bi bi-bar-chart-line me-2"></i>Отчёт за {{ current_year }} год
+                    </a>
+                    <a href="{{ url_for('export') }}" class="btn btn-outline-success">
+                        <i class="bi bi-file-earmark-excel me-2"></i>Экспорт всех данных в Excel
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="card-title fw-semibold mb-3"><i class="bi bi-cpu me-2"></i>Статус распознавания (OCR)</h6>
+                <ul class="list-group list-group-flush">
+                    <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                        <span>PyMuPDF (PDF)</span>
+                        {% if ocr_status.pymupdf %}
+                            <span class="badge bg-success">Установлен</span>
+                        {% else %}
+                            <span class="badge bg-danger">Не установлен</span>
+                        {% endif %}
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                        <span>Tesseract OCR (изображения)</span>
+                        {% if ocr_status.pytesseract %}
+                            {% if ocr_status.tesseract_version is defined %}
+                                <span class="badge bg-success">v{{ ocr_status.tesseract_version }}</span>
+                            {% else %}
+                                <span class="badge bg-warning text-dark">Не найден по пути</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="badge bg-danger">Не установлен</span>
+                        {% endif %}
+                    </li>
+                </ul>
+                {% if not ocr_status.pymupdf or not ocr_status.pytesseract %}
+                <div class="alert alert-warning mt-2 mb-0 small py-2">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    Часть компонентов не установлена. Данные можно вводить вручную.
+                    Подробнее — в README.md.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Последние записи -->
+{% if latest %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body">
+        <h6 class="card-title fw-semibold mb-3"><i class="bi bi-clock-history me-2"></i>Последние записи</h6>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Дата</th>
+                        <th>РПО</th>
+                        <th>Получатель</th>
+                        <th>Сумма</th>
+                        <th>Проект</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in latest %}
+                    <tr>
+                        <td>{{ r.date_send }}</td>
+                        <td><code class="small">{{ r.rpo }}</code></td>
+                        <td>{{ r.recipient or '—' }}</td>
+                        <td class="text-end">{{ "%.2f"|format(r.amount) }} ₽</td>
+                        <td><span class="badge bg-secondary bg-opacity-75">{{ r.project }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-end mt-2">
+            <a href="{{ url_for('expenses') }}" class="btn btn-sm btn-outline-primary">
+                Все записи <i class="bi bi-arrow-right ms-1"></i>
+            </a>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5 text-muted">
+        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+        <p class="mb-3">Записей пока нет.</p>
+        <a href="{{ url_for('upload') }}" class="btn btn-primary">
+            <i class="bi bi-plus-circle me-2"></i>Добавить первый чек
+        </a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
