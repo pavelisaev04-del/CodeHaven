@@ -18,6 +18,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS expenses (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            seq_num     INTEGER,
             date_send   TEXT NOT NULL,
             rpo         TEXT NOT NULL,
             sender      TEXT,
@@ -35,6 +36,38 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    _migrate_add_seq_num()
+
+
+def _migrate_add_seq_num():
+    """
+    Добавляет колонку seq_num если её нет (для совместимости с уже созданными БД).
+    seq_num — это сквозной порядковый номер строки, как в оригинальной Excel-таблице.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(expenses)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'seq_num' not in columns:
+        cursor.execute("ALTER TABLE expenses ADD COLUMN seq_num INTEGER")
+        # Назначаем порядковые номера существующим записям по порядку id
+        cursor.execute('''
+            UPDATE expenses SET seq_num = (
+                SELECT COUNT(*) FROM expenses e2 WHERE e2.id <= expenses.id
+            )
+        ''')
+        conn.commit()
+    conn.close()
+
+
+def get_next_seq_num():
+    """Возвращает следующий порядковый номер для новой записи."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(MAX(seq_num), 0) + 1 FROM expenses")
+    num = cursor.fetchone()[0]
+    conn.close()
+    return num
 
 
 def check_rpo_duplicate(rpo, exclude_id=None):
@@ -55,10 +88,13 @@ def add_record(date_send, rpo, sender, recipient, amount, project, file_path, co
     conn = get_connection()
     cursor = conn.cursor()
     created_at = datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+    # Следующий порядковый номер (продолжение нумерации как в оригинальной таблице)
+    cursor.execute("SELECT COALESCE(MAX(seq_num), 0) + 1 FROM expenses")
+    seq_num = cursor.fetchone()[0]
     cursor.execute('''
-        INSERT INTO expenses (date_send, rpo, sender, recipient, amount, project, file_path, created_at, comment)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (date_send, str(rpo), sender, recipient, float(amount), project, file_path, created_at, comment))
+        INSERT INTO expenses (seq_num, date_send, rpo, sender, recipient, amount, project, file_path, created_at, comment)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (seq_num, date_send, str(rpo), sender, recipient, float(amount), project, file_path, created_at, comment))
     conn.commit()
     record_id = cursor.lastrowid
     conn.close()
