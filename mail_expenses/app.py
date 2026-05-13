@@ -19,7 +19,6 @@ app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 
 # Создаём нужные папки при запуске
 os.makedirs(config.UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(config.STORAGE_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.DATABASE_PATH), exist_ok=True)
 
 database.init_db()
