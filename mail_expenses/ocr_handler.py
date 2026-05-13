@@ -131,8 +131,19 @@ def parse_receipt(text):
 
 
 def _find_date(text):
-    """Ищет дату в формате ДД.ММ.ГГГГ."""
-    # Сначала ищем рядом с характерными словами
+    """
+    Ищет дату в тексте чека Почты России.
+    Поддерживает форматы: ДД.ММ.ГГГГ и ДД.ММ.ГГ (внизу кассового чека).
+    """
+    # Формат ДД.ММ.ГГ ЧЧ:ММ — дата внизу кассового чека Почты России
+    # Например: 01.04.26 18:57
+    short_year = re.search(r'\b(\d{2}\.\d{2}\.\d{2})\s+\d{2}:\d{2}', text)
+    if short_year:
+        normalized = _normalize_date_short(short_year.group(1))
+        if normalized:
+            return normalized
+
+    # Дата рядом с ключевыми словами, полный год
     keyword_pattern = (
         r'(?:дат[аы]|принято|отправлено|дата\s+приёма|дата\s+приема)'
         r'[:\s]+(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})'
@@ -141,7 +152,7 @@ def _find_date(text):
     if match:
         return _normalize_date(match.group(1))
 
-    # Ищем любую дату в тексте
+    # Любая дата с полным годом
     all_dates = re.findall(r'\b(\d{2}[.\-/]\d{2}[.\-/]\d{4})\b', text)
     for date_str in all_dates:
         normalized = _normalize_date(date_str)
@@ -152,11 +163,25 @@ def _find_date(text):
 
 
 def _normalize_date(date_str):
-    """Приводит дату к формату ДД.ММ.ГГГГ, проверяет корректность."""
+    """Приводит дату ДД.ММ.ГГГГ к стандартному формату, проверяет корректность."""
     date_str = date_str.replace('-', '.').replace('/', '.')
     try:
         d = datetime.strptime(date_str, '%d.%m.%Y')
-        # Отклоняем даты ранее 2000 года и позже текущего + 1 год
+        if d.year < 2000 or d.year > datetime.now().year + 1:
+            return None
+        return d.strftime('%d.%m.%Y')
+    except ValueError:
+        return None
+
+
+def _normalize_date_short(date_str):
+    """
+    Приводит дату ДД.ММ.ГГ к формату ДД.ММ.ГГГГ.
+    Например: 01.04.26 → 01.04.2026
+    """
+    date_str = date_str.replace('-', '.').replace('/', '.')
+    try:
+        d = datetime.strptime(date_str, '%d.%m.%y')
         if d.year < 2000 or d.year > datetime.now().year + 1:
             return None
         return d.strftime('%d.%m.%Y')
@@ -165,29 +190,37 @@ def _normalize_date(date_str):
 
 
 def _find_rpo(text):
-    """Ищет трек-номер РПО."""
-    # Почта России: 14 цифр
-    # Международный формат: XX999999999XX (2 буквы + 9 цифр + 2 буквы)
+    """
+    Ищет трек-номер РПО в чеке Почты России.
+    Форматы:
+      - '1 РПО № 80110619875732' (кассовый чек)
+      - 'РПО: 80110619875732'
+      - просто 14 цифр подряд
+      - международный: RX123456789RU
+    """
     patterns = [
-        # С ключевым словом
+        # Кассовый чек Почты России: "1 РПО № XXXXXXXXXXXXXX"
+        r'\d+\s+рпо\s*[№#]?\s*(\d{14})',
+        # Стандартные метки
         r'(?:рпо|идентификатор|шпи|штрих[\s\-]?код|трек)[:\s#№]+(\d{14})',
         r'(?:рпо|идентификатор|шпи)[:\s#№]+([A-Za-z]{2}\d{9}[A-Za-z]{2})',
-        # Без ключевого слова — ищем 14 цифр подряд
+        # 14 цифр без ключевого слова
         r'\b(\d{14})\b',
-        # Международный формат без ключевого слова
-        r'\b([A-Z]{2}\d{9}[A-Z]{2})\b',
+        # Международный формат
+        r'\b([A-Za-z]{2}\d{9}[A-Za-z]{2})\b',
     ]
-
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1).strip().upper()
-
     return None
 
 
 def _find_sender(text):
-    """Ищет отправителя."""
+    """
+    Ищет отправителя.
+    В кассовом чеке Почты России: 'Отправитель: Фамилия Имя Отчество'
+    """
     patterns = [
         r'(?:отправитель|от\s+кого|кто\s+отправил)[:\s]+([^\n]{3,80})',
         r'(?:sender)[:\s]+([^\n]{3,80})',
@@ -202,40 +235,71 @@ def _find_sender(text):
 
 
 def _find_recipient(text):
-    """Ищет получателя."""
+    """
+    Ищет получателя.
+    В кассовом чеке Почты России поле называется 'Адресат:'.
+    Берём только ФИО/название, не адрес доставки.
+    """
     patterns = [
-        r'(?:получатель|кому|адресат|recipient)[:\s]+([^\n]{3,100})',
+        # Кассовый чек Почты России: "Адресат: Фамилия И.О."
+        r'адресат[:\s]+([^\n]{3,100})',
+        # Стандартные варианты
+        r'(?:получатель|кому|recipient)[:\s]+([^\n]{3,100})',
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             name = match.group(1).strip().rstrip(',.;')
-            if len(name) >= 3:
+            # Отбрасываем строки, похожие на адрес (содержат цифры и слова "г.", "ул." и т.д.)
+            if len(name) >= 2 and not re.search(r'\d{6}', name):
                 return name
     return None
 
 
 def _find_amount(text):
-    """Ищет сумму оплаты."""
-    patterns = [
-        # С ключевым словом и суммой X,XX или X.XX
-        r'(?:итого|к\s+оплате|оплачено|сумма|стоимость)[:\s]+(\d{1,6}[.,]\d{2})',
-        # Число с рублями рядом
-        r'(\d{1,6}[.,]\d{2})\s*(?:руб|₽)',
-        # Число с ключевым словом (без копеек)
-        r'(?:итого|к\s+оплате)[:\s]+(\d{1,6})',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            amount_str = match.group(1).replace(',', '.')
-            try:
-                val = float(amount_str)
-                # Отклоняем слишком маленькие и слишком большие суммы
-                if 0 < val < 1_000_000:
-                    return f'{val:.2f}'
-            except ValueError:
-                pass
+    """
+    Ищет итоговую сумму оплаты.
+    В кассовом чеке Почты России приоритет:
+      1. ИТОГ =133.60  (строка с жирным ИТОГ)
+      2. БЕЗНАЛИЧНЫМИ =133.60
+      3. К ОПЛАТЕ ...
+      4. Любое число с рублями
+    Избегаем 'Тариф за пересылку' — это не итоговая сумма.
+    """
+    # Формат кассового чека: "ИТОГ =133.60" или "ИТОГ =133,60"
+    itog = re.search(r'итог[оа]?\s*=\s*(\d{1,6}[.,]\d{2})', text, re.IGNORECASE)
+    if itog:
+        return _parse_amount(itog.group(1))
+
+    # БЕЗНАЛИЧНЫМИ =133.60
+    beznal = re.search(r'безналичными\s*=?\s*(\d{1,6}[.,]\d{2})', text, re.IGNORECASE)
+    if beznal:
+        return _parse_amount(beznal.group(1))
+
+    # К оплате / Оплачено
+    oplata = re.search(
+        r'(?:к\s+оплате|оплачено|итого)[:\s=]+(\d{1,6}[.,]\d{2})',
+        text, re.IGNORECASE
+    )
+    if oplata:
+        return _parse_amount(oplata.group(1))
+
+    # Число с рублями — последнее найденное (обычно итог внизу чека)
+    all_amounts = re.findall(r'(\d{1,6}[.,]\d{2})\s*(?:руб|₽)', text, re.IGNORECASE)
+    if all_amounts:
+        return _parse_amount(all_amounts[-1])
+
+    return None
+
+
+def _parse_amount(amount_str):
+    """Преобразует строку суммы в число с двумя знаками."""
+    try:
+        val = float(amount_str.replace(',', '.'))
+        if 0 < val < 1_000_000:
+            return f'{val:.2f}'
+    except ValueError:
+        pass
     return None
 
 
