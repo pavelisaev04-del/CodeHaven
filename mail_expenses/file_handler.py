@@ -41,28 +41,38 @@ def build_filename(date_send, recipient, ext, number=None):
 
 def get_project_folder(project):
     """
-    Возвращает путь к папке проекта на сервере.
+    Возвращает путь к папке «Расходы» внутри папки проекта на сервере.
 
-    Структура пути:
-        STORAGE_BASE \ [Название проекта] \ STORAGE_EXPENSES_SUBFOLDER
+    Алгоритм:
+      1. Ищет подпапку, содержащую слово «расходы» (без учёта регистра и номера),
+         например: «10. Расходы», «5. Расходы», «Расходы», «12.Расходы».
+      2. Если такая папка найдена — возвращает её путь.
+      3. Если не найдена — берёт STORAGE_EXPENSES_SUBFOLDER из config как запасной вариант.
 
-    Пример:
+    Пример путей:
         R:\149. БЛИНОВСКАЯ\10. Расходы
-        R:\158. ГОНЧАРОВА\10. Расходы
-        R:\117. ЛЕОНИДАС\10. Расходы
-
-    «Название проекта» в форме должно совпадать с именем папки на диске R:.
+        R:\158. ГОНЧАРОВА\5. Расходы
+        R:\117. ЛЕОНИДАС\Расходы
     """
     base = getattr(config, 'STORAGE_BASE', None) or getattr(config, 'STORAGE_FOLDER', '.')
-    subfolder = getattr(config, 'STORAGE_EXPENSES_SUBFOLDER', '')
+    fallback_subfolder = getattr(config, 'STORAGE_EXPENSES_SUBFOLDER', '')
 
-    # Название проекта используем как есть (не очищаем точки и цифры —
-    # они нужны, т.к. папки на R: называются "149. БЛИНОВСКАЯ")
     project_name = project.strip() if project else 'Без_проекта'
+    project_path = os.path.join(base, project_name)
 
-    if subfolder:
-        return os.path.join(base, project_name, subfolder)
-    return os.path.join(base, project_name)
+    # Ищем подпапку с «расходы» в названии, если папка проекта уже существует
+    if os.path.isdir(project_path):
+        try:
+            for entry in os.scandir(project_path):
+                if entry.is_dir() and re.search(r'расход', entry.name, re.IGNORECASE):
+                    return entry.path
+        except OSError:
+            pass
+
+    # Запасной вариант: берём из конфига
+    if fallback_subfolder:
+        return os.path.join(project_path, fallback_subfolder)
+    return project_path
 
 
 def move_receipt_file(temp_path, date_send, recipient, project):
