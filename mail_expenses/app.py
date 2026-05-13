@@ -255,7 +255,6 @@ def save():
             comment=comment,
         )
     except Exception as e:
-        # Файл уже перемещён — сообщаем об этом пользователю
         flash(
             f'Файл перемещён, но запись не сохранена в БД: {e}. '
             f'Файл находится по пути: {new_path}',
@@ -263,6 +262,24 @@ def save():
         )
         session.pop('receipt', None)
         return redirect(url_for('expenses'))
+
+    # ── Запись в основной Excel-файл на сервере ──
+    record_for_excel = {
+        'seq_num': database.get_next_seq_num() - 1,  # уже добавлен в БД
+        'date_send': date_send,
+        'rpo': rpo,
+        'sender': sender,
+        'recipient': recipient,
+        'amount': float(amount_raw),
+        'project': project,
+    }
+    try:
+        excel_handler.append_to_master_excel(record_for_excel)
+    except RuntimeError as e:
+        # Excel недоступен — запись в БД уже сохранена, просто предупреждаем
+        flash(f'Запись сохранена в базу данных, но в Excel не добавлена: {e}', 'warning')
+    except Exception as e:
+        flash(f'Запись сохранена в базу данных, но в Excel не добавлена: {e}', 'warning')
 
     session.pop('receipt', None)
     flash(f'Запись #{record_id} успешно сохранена!', 'success')

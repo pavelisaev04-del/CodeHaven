@@ -176,6 +176,107 @@ def _apply_column_widths(ws):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
+def append_to_master_excel(record):
+    """
+    Добавляет одну строку с новой записью в основной Excel-файл на сервере.
+    Файл должен существовать и иметь лист с названием из config.EXCEL_MASTER_SHEET.
+
+    Возвращает порядковый номер добавленной строки.
+    Выбрасывает RuntimeError если файл недоступен или занят.
+    """
+    master_file = getattr(config, 'EXCEL_MASTER_FILE', '')
+    if not master_file:
+        return None  # Запись в Excel отключена в настройках
+
+    if not os.path.exists(master_file):
+        raise RuntimeError(
+            f'Основной Excel-файл не найден: {master_file}\n'
+            'Проверьте путь EXCEL_MASTER_FILE в config.py и доступность диска R:'
+        )
+
+    try:
+        wb = openpyxl.load_workbook(master_file)
+    except PermissionError:
+        raise RuntimeError(
+            'Файл Excel открыт другим пользователем. '
+            'Закройте файл и попробуйте снова.'
+        )
+    except Exception as e:
+        raise RuntimeError(f'Не удалось открыть файл Excel: {e}')
+
+    # Выбираем нужный лист
+    sheet_name = getattr(config, 'EXCEL_MASTER_SHEET', 'Общие расходы')
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        # Берём первый лист и предупреждаем
+        ws = wb.active
+
+    # Ищем последнюю строку с данными (пропускаем заголовки в строках 1-2)
+    last_data_row = 2
+    for row_idx in range(ws.max_row, 2, -1):
+        # Считаем строку заполненной, если есть дата (колонка B)
+        if ws.cell(row=row_idx, column=2).value is not None:
+            last_data_row = row_idx
+            break
+
+    new_row = last_data_row + 1
+
+    # Следующий порядковый номер = последний № + 1
+    last_seq = ws.cell(row=last_data_row, column=1).value
+    try:
+        seq_num = int(last_seq) + 1
+    except (TypeError, ValueError):
+        seq_num = record.get('seq_num') or 1
+
+    # Стили — максимально близко к оригинальной таблице
+    thin = Side(style='thin', color='000000')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    font = Font(name='Times New Roman', size=11)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+    def _c(col, value, align=None, num_format=None):
+        c = ws.cell(row=new_row, column=col, value=value)
+        c.font = font
+        c.border = border
+        c.alignment = align or left
+        if num_format:
+            c.number_format = num_format
+        return c
+
+    # A: порядковый №
+    _c(1, seq_num, align=center)
+    # B: дата отправки
+    _c(2, record.get('date_send', ''), align=center)
+    # C: РПО — как текст, чтобы Excel не обрезал цифры
+    rpo_cell = _c(3, str(record.get('rpo', '')), align=center)
+    rpo_cell.number_format = '@'
+    # D: назначение расходов (всегда одинаковое)
+    _c(4, 'отправка почты', align=center)
+    # E: кто отправил
+    _c(5, record.get('sender', '') or '', align=left)
+    # F: кому отправил
+    _c(6, record.get('recipient', '') or '', align=left)
+    # G: сумма
+    _c(7, float(record.get('amount', 0) or 0), align=center, num_format='#,##0.00')
+    # H: проект
+    _c(8, record.get('project', '') or '', align=left)
+
+    ws.row_dimensions[new_row].height = 18
+
+    try:
+        wb.save(master_file)
+    except PermissionError:
+        raise RuntimeError(
+            'Не удалось сохранить файл Excel — он открыт другим пользователем. '
+            'Запись в базу данных сохранена, но в Excel строка не добавлена. '
+            'Закройте Excel-файл и повторите попытку.'
+        )
+
+    return seq_num
+
+
 def _build_filename_suffix(filter_params):
     """Формирует суффикс имени файла по параметрам фильтра."""
     if not filter_params:
