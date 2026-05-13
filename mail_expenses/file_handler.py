@@ -39,11 +39,38 @@ def build_filename(date_send, recipient, ext, number=None):
     return f'{date_part}_Отправка почты {recipient_clean}.{ext}'
 
 
+def get_project_folder(project):
+    """
+    Возвращает путь к папке проекта на сервере.
+
+    Структура пути:
+        STORAGE_BASE \ [Название проекта] \ STORAGE_EXPENSES_SUBFOLDER
+
+    Пример:
+        R:\149. БЛИНОВСКАЯ\10. Расходы
+        R:\158. ГОНЧАРОВА\10. Расходы
+        R:\117. ЛЕОНИДАС\10. Расходы
+
+    «Название проекта» в форме должно совпадать с именем папки на диске R:.
+    """
+    base = getattr(config, 'STORAGE_BASE', None) or getattr(config, 'STORAGE_FOLDER', '.')
+    subfolder = getattr(config, 'STORAGE_EXPENSES_SUBFOLDER', '')
+
+    # Название проекта используем как есть (не очищаем точки и цифры —
+    # они нужны, т.к. папки на R: называются "149. БЛИНОВСКАЯ")
+    project_name = project.strip() if project else 'Без_проекта'
+
+    if subfolder:
+        return os.path.join(base, project_name, subfolder)
+    return os.path.join(base, project_name)
+
+
 def move_receipt_file(temp_path, date_send, recipient, project):
     """
-    Переименовывает и перемещает файл чека в папку проекта.
+    Переименовывает и перемещает файл чека в папку проекта на сервере.
 
-    Структура: STORAGE_FOLDER / Проект / ГГГГММДД_Отправка почты Получатель.pdf
+    Итоговый путь:
+        R:\[Название проекта]\10. Расходы\ГГГГММДД_Отправка почты Получатель.pdf
 
     Возвращает итоговый путь к файлу.
     Исходный файл не удаляется, пока перемещение не завершится успешно.
@@ -53,10 +80,16 @@ def move_receipt_file(temp_path, date_send, recipient, project):
 
     ext = temp_path.rsplit('.', 1)[-1].lower()
 
-    # Создаём папку проекта
-    project_clean = clean_for_filename(project)
-    project_folder = os.path.join(config.STORAGE_FOLDER, project_clean)
-    os.makedirs(project_folder, exist_ok=True)
+    # Определяем и создаём папку проекта
+    project_folder = get_project_folder(project)
+    try:
+        os.makedirs(project_folder, exist_ok=True)
+    except OSError as e:
+        raise OSError(
+            f'Не удалось создать папку: {project_folder}\n'
+            f'Проверьте доступность диска R: и права на запись.\n'
+            f'Ошибка: {e}'
+        )
 
     # Подбираем уникальное имя файла
     number = 1
@@ -67,9 +100,7 @@ def move_receipt_file(temp_path, date_send, recipient, project):
             break
         number += 1
 
-    # Перемещаем файл только после успешного создания папки
     shutil.move(temp_path, dest_path)
-
     return dest_path
 
 
