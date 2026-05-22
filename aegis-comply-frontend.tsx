@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, createContext, useContext } from "react";
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, BarChart, Bar, XAxis, Cell } from 'recharts';
 
 const C={bg:'#040917',bgDeep:'#020610',card:'#081030',cardHi:'#0D1A48',border:'#142560',borderHi:'#2440A0',accent:'#4BC8FF',accentBg:'rgba(75,200,255,0.09)',text:'#E8F0FF',muted:'#5570A8',green:'#0FD19A',greenBg:'rgba(15,209,154,0.09)',amber:'#F5A623',amberBg:'rgba(245,166,35,0.09)',red:'#FF4060',redBg:'rgba(255,64,96,0.09)',purple:'#A78BFA',purpleBg:'rgba(167,139,250,0.09)'};
@@ -9,19 +9,95 @@ const COUNTRIES=[{v:'CN',l:'🇨🇳 Китай'},{v:'TR',l:'🇹🇷 Турци
 const CURRENCIES=[{v:'CNY',l:'CNY — Юань'},{v:'TRY',l:'TRY — Лира'},{v:'AED',l:'AED — Дирхам'},{v:'USD',l:'USD — Доллар'},{v:'EUR',l:'EUR — Евро'},{v:'RUB',l:'RUB — Рубль'},{v:'INR',l:'INR — Рупия'}];
 const CTYPES=[{v:'ООО',l:'ООО'},{v:'АО',l:'АО'},{v:'LLC',l:'LLC'},{v:'LTD',l:'LTD'},{v:'INC',l:'INC/Corp'},{v:'FZ',l:'Free Zone (UAE)'},{v:'OTHER',l:'Иное'}];
 
-// ── utils ───────────────────────────────────────────────────────────────────
-const parseSafe = (raw) => {
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('JSON не найден в ответе');
-  let s = m[0];
-  s = s.replace(/,(\s*[}\]])/g,'$1');       // trailing commas
-  s = s.replace(/[\u0000-\u001F]/g,' ');    // control chars
-  return JSON.parse(s);
-};
+// ── API layer ─────────────────────────────────────────────────────────────────
+const API = '/api';
 
-const printDossier = (res, cr) => {
-  const vp = VP[res.verdict]||VP.CAUTION;
-  const rows = (arr) => arr.filter(([,v])=>v&&v!=='—').map(([k,v])=>`<tr><td style="color:#888;width:140px">${k}</td><td><b>${v}</b></td></tr>`).join('');
+interface AuthTokens { accessToken: string; refreshToken: string; }
+interface AuthCtx {
+  accessToken: string | null;
+  refreshAccessToken: () => Promise<string | null>;
+  setTokens: (t: AuthTokens) => void;
+  clearTokens: () => void;
+}
+
+const AuthContext = createContext<AuthCtx>({
+  accessToken: null,
+  refreshAccessToken: async () => null,
+  setTokens: () => {},
+  clearTokens: () => {},
+});
+
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [accessToken, setAccessToken] = useState<string | null>(
+    () => localStorage.getItem('aegis_access')
+  );
+
+  const setTokens = useCallback((t: AuthTokens) => {
+    localStorage.setItem('aegis_access', t.accessToken);
+    localStorage.setItem('aegis_refresh', t.refreshToken);
+    setAccessToken(t.accessToken);
+  }, []);
+
+  const clearTokens = useCallback(() => {
+    localStorage.removeItem('aegis_access');
+    localStorage.removeItem('aegis_refresh');
+    setAccessToken(null);
+  }, []);
+
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    const rt = localStorage.getItem('aegis_refresh');
+    if (!rt) return null;
+    try {
+      const res = await fetch(`${API}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: rt }),
+      });
+      if (!res.ok) { clearTokens(); return null; }
+      const data = await res.json();
+      setTokens({ accessToken: data.accessToken, refreshToken: data.refreshToken });
+      return data.accessToken;
+    } catch {
+      clearTokens();
+      return null;
+    }
+  }, [clearTokens, setTokens]);
+
+  return (
+    <AuthContext.Provider value={{ accessToken, refreshAccessToken, setTokens, clearTokens }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+async function apiFetch(
+  path: string,
+  options: RequestInit,
+  token: string | null,
+  refresh: () => Promise<string | null>
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> ?? {}),
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  let res = await fetch(`${API}${path}`, { ...options, headers });
+
+  if (res.status === 401) {
+    const newToken = await refresh();
+    if (newToken) {
+      headers['Authorization'] = `Bearer ${newToken}`;
+      res = await fetch(`${API}${path}`, { ...options, headers });
+    }
+  }
+  return res;
+}
+
+// ── utils ─────────────────────────────────────────────────────────────────────
+const printDossier = (res: any, cr: any) => {
+  const vp = VP[res.verdict as keyof typeof VP]||VP.CAUTION;
+  const rows = (arr: [string, string][]) => arr.filter(([,v])=>v&&v!=='—').map(([k,v])=>`<tr><td style="color:#888;width:140px">${k}</td><td><b>${v}</b></td></tr>`).join('');
   const win = window.open('','_blank','width=860,height=700');
   if(!win) return;
   win.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Досье — ${cr?.counterparty}</title>
@@ -30,38 +106,38 @@ const printDossier = (res, cr) => {
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
 <svg width="30" height="36" viewBox="0 0 280 340"><path d="M68,59 L212,59 L228,163 L140,244 L52,163Z" fill="#081030" stroke="#4BC8FF" stroke-width="4"/><line x1="140" y1="78" x2="86" y2="224" stroke="white" stroke-width="20" stroke-linecap="round"/><line x1="140" y1="78" x2="194" y2="224" stroke="white" stroke-width="20" stroke-linecap="round"/><rect x="52" y="141" width="176" height="10" fill="#4BC8FF"/></svg>
 <div><h2>AEGIS COMPLY</h2><div style="color:#888;font-size:11px">Комплаенс-досье · evidence trail</div></div>
-<div style="margin-left:auto;text-align:right;font-size:10px;color:#888"><div>ID: ${cr?.id}</div><div>${new Date(cr?.date||'').toLocaleString('ru-RU')}</div></div></div>
+<div style="margin-left:auto;text-align:right;font-size:10px;color:#888"><div>ID: ${cr?.id}</div><div>${new Date(cr?.createdAt||cr?.date||'').toLocaleString('ru-RU')}</div></div></div>
 <div class="sec">Объект проверки</div>
-<table>${rows([['Контрагент',cr?.counterparty],['Страна',cr?.country],['Товар',cr?.form?.product],['Код ТН ВЭД',cr?.form?.tnved||'н/у'],['Валюта / сумма',`${cr?.form?.currency||'—'} / ${cr?.form?.val||'—'}`],['Транзит',cr?.form?.transit||'прямая'],['Банк',cr?.form?.bank||'н/у'],['UBO',cr?.form?.ubo||'н/у']])}</table>
+<table>${rows([['Контрагент',cr?.counterparty],['Страна',cr?.country],['Товар',cr?.product||(cr?.formData?.product)],['Код ТН ВЭД',(cr?.formData?.tnved)||'н/у'],['Валюта / сумма',`${cr?.currency||(cr?.formData?.currency)||'—'} / ${(cr?.formData?.val)||'—'}`],['Транзит',(cr?.formData?.transit)||'прямая'],['Банк',(cr?.formData?.bank)||'н/у'],['UBO',(cr?.formData?.ubo)||'н/у']])}</table>
 <div class="sec">Вердикт</div>
 <div class="verdict" style="background:${vp.bg};color:${vp.c}">${vp.i} ${vp.l}</div>
 <div style="font-size:12px;color:#555;margin-bottom:6px">${res.summary||''}</div>
 <div style="font-size:11px;color:#888">Риск-скор: <b>${res.score||0}</b>/100 · Уровень: <b>${res.overall||'—'}</b></div>
-${res.red_flags?.length?`<div class="sec">Риск-факторы</div>${res.red_flags.map(f=>`<div style="padding:3px 0;color:#cc3333">! ${f}</div>`).join('')}`:''}
-${res.norms?.length?`<div class="sec">Применимые нормы</div><div>${res.norms.map(n=>`<span class="tag" style="color:#6644cc">§ ${n}</span>`).join('')}</div>`:''}
-${res.recs?.length?`<div class="sec">Рекомендации</div>${res.recs.map((r,i)=>`<div style="padding:4px 0">${i+1}. ${r}</div>`).join('')}`:''}
+${res.red_flags?.length?`<div class="sec">Риск-факторы</div>${res.red_flags.map((f: string)=>`<div style="padding:3px 0;color:#cc3333">! ${f}</div>`).join('')}`:''}
+${res.norms?.length?`<div class="sec">Применимые нормы</div><div>${res.norms.map((n: string)=>`<span class="tag" style="color:#6644cc">§ ${n}</span>`).join('')}</div>`:''}
+${res.recs?.length?`<div class="sec">Рекомендации</div>${res.recs.map((r: string,i: number)=>`<div style="padding:4px 0">${i+1}. ${r}</div>`).join('')}`:''}
 <div class="disc"><b>Disclaimer:</b> Данное досье сформировано AI-агентом Aegis Comply как система поддержки принятия решений. Не является юридическим заключением. Окончательное решение принимается ответственным лицом. Human-in-the-loop. Aegis Comply © 2025.</div>
 </body></html>`);
   win.document.close();
   setTimeout(()=>win.print(),600);
 };
 
-const copyDossier = (res, cr) => {
+const copyDossier = (res: any, cr: any) => {
   const lines = [
-    'AEGIS COMPLY — Комплаенс-досье',`ID: ${cr?.id} · ${new Date(cr?.date||'').toLocaleString('ru-RU')}`,'',
+    'AEGIS COMPLY — Комплаенс-досье',`ID: ${cr?.id} · ${new Date(cr?.createdAt||cr?.date||'').toLocaleString('ru-RU')}`,'',
     '─ ОБЪЕКТ ПРОВЕРКИ ─',
-    `Контрагент: ${cr?.counterparty}`,`Страна: ${cr?.country}`,`Товар: ${cr?.form?.product}`,
-    `Вердикт: ${VP[res.verdict]?.l||res.verdict}`,`Риск-скор: ${res.score}/100`,`Уровень: ${res.overall}`,'',
+    `Контрагент: ${cr?.counterparty}`,`Страна: ${cr?.country}`,`Товар: ${cr?.product||cr?.formData?.product}`,
+    `Вердикт: ${VP[res.verdict as keyof typeof VP]?.l||res.verdict}`,`Риск-скор: ${res.score}/100`,`Уровень: ${res.overall}`,'',
     '─ РЕЗЮМЕ ─', res.summary||'','',
-    ...(res.red_flags?.length?['─ РИСК-ФАКТОРЫ ─',...res.red_flags.map(f=>`! ${f}`),'']:[]),
-    ...(res.norms?.length?['─ ПРИМЕНИМЫЕ НОРМЫ ─',...res.norms.map(n=>`§ ${n}`),'']:[]),
-    ...(res.recs?.length?['─ РЕКОМЕНДАЦИИ ─',...res.recs.map((r,i)=>`${i+1}. ${r}`),'']:[]),
+    ...(res.red_flags?.length?['─ РИСК-ФАКТОРЫ ─',...res.red_flags.map((f: string)=>`! ${f}`),'']:[]),
+    ...(res.norms?.length?['─ ПРИМЕНИМЫЕ НОРМЫ ─',...res.norms.map((n: string)=>`§ ${n}`),'']:[]),
+    ...(res.recs?.length?['─ РЕКОМЕНДАЦИИ ─',...res.recs.map((r: string,i: number)=>`${i+1}. ${r}`),'']:[]),
     'Aegis Comply © 2025 · Система поддержки принятия решений · Human-in-the-loop',
   ];
   navigator.clipboard?.writeText(lines.join('\n'));
 };
 
-// ── primitives ──────────────────────────────────────────────────────────────
+// ── primitives ────────────────────────────────────────────────────────────────
 const Shield=({size=40})=>(
   <svg width={size} height={size*1.2} viewBox="0 0 280 340">
     <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1E3380"/><stop offset="100%" stopColor="#050B22"/></linearGradient></defs>
@@ -72,34 +148,34 @@ const Shield=({size=40})=>(
     <circle cx="52" cy="146" r="7" fill={C.accent}/><circle cx="228" cy="146" r="7" fill={C.accent}/>
   </svg>
 );
-const Btn=({children,onClick,v='primary',style={},disabled=false})=>{
-  const s={primary:{background:`linear-gradient(135deg,#1660A0,${C.accent})`,color:'#fff',border:'none'},outline:{background:'transparent',color:C.accent,border:`1px solid ${C.accent}`},ghost:{background:'transparent',color:C.muted,border:'none'},success:{background:C.greenBg,color:C.green,border:`1px solid ${C.green}`}};
+const Btn=({children,onClick,v='primary',style={},disabled=false}: any)=>{
+  const s: any={primary:{background:`linear-gradient(135deg,#1660A0,${C.accent})`,color:'#fff',border:'none'},outline:{background:'transparent',color:C.accent,border:`1px solid ${C.accent}`},ghost:{background:'transparent',color:C.muted,border:'none'},success:{background:C.greenBg,color:C.green,border:`1px solid ${C.green}`}};
   return <button onClick={onClick} disabled={disabled} style={{padding:'9px 18px',borderRadius:8,fontWeight:600,fontSize:13,cursor:disabled?'not-allowed':'pointer',opacity:disabled?0.5:1,...(s[v]||s.primary),...style}}>{children}</button>;
 };
-const Card=({children,style={}})=><div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:20,...style}}>{children}</div>;
-const Badge=({level})=>{const p=RP[level]||{c:C.muted,bg:C.card,l:level||'—'};return <span style={{background:p.bg,color:p.c,border:`1px solid ${p.c}`,padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:700}}>{p.l}</span>;};
-const Inp=({label,value,onChange,placeholder,type='text',req=false,hint=''})=>(
+const Card=({children,style={}}: any)=><div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:20,...style}}>{children}</div>;
+const Badge=({level}: any)=>{const p=(RP as any)[level]||{c:C.muted,bg:C.card,l:level||'—'};return <span style={{background:p.bg,color:p.c,border:`1px solid ${p.c}`,padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:700}}>{p.l}</span>;};
+const Inp=({label,value,onChange,placeholder,type='text',req=false,hint=''}: any)=>(
   <div style={{marginBottom:13}}>
     {label&&<label style={{display:'block',marginBottom:5,color:C.muted,fontSize:12}}>{label}{req&&<span style={{color:C.red}}> *</span>}</label>}
-    <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:'100%',background:C.bgDeep,border:`1px solid ${C.border}`,borderRadius:7,padding:'9px 12px',color:C.text,fontSize:13,outline:'none',boxSizing:'border-box'}}/>
+    <input type={type} value={value} onChange={(e: any)=>onChange(e.target.value)} placeholder={placeholder} style={{width:'100%',background:C.bgDeep,border:`1px solid ${C.border}`,borderRadius:7,padding:'9px 12px',color:C.text,fontSize:13,outline:'none',boxSizing:'border-box'}}/>
     {hint&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{hint}</div>}
   </div>
 );
-const Sel=({label,value,onChange,options,req=false})=>(
+const Sel=({label,value,onChange,options,req=false}: any)=>(
   <div style={{marginBottom:13}}>
     {label&&<label style={{display:'block',marginBottom:5,color:C.muted,fontSize:12}}>{label}{req&&<span style={{color:C.red}}> *</span>}</label>}
-    <select value={value} onChange={e=>onChange(e.target.value)} style={{width:'100%',background:C.bgDeep,border:`1px solid ${C.border}`,borderRadius:7,padding:'9px 12px',color:value?C.text:C.muted,fontSize:13,outline:'none',boxSizing:'border-box'}}>
+    <select value={value} onChange={(e: any)=>onChange(e.target.value)} style={{width:'100%',background:C.bgDeep,border:`1px solid ${C.border}`,borderRadius:7,padding:'9px 12px',color:value?C.text:C.muted,fontSize:13,outline:'none',boxSizing:'border-box'}}>
       <option value="">Выберите...</option>
-      {options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+      {options.map((o: any)=><option key={o.v} value={o.v}>{o.l}</option>)}
     </select>
   </div>
 );
-const Bar=({score,color})=>(<div style={{height:5,background:C.border,borderRadius:3,marginBottom:9}}><div style={{height:5,borderRadius:3,width:`${Math.min(score,100)}%`,background:color}}/></div>);
+const BarViz=({score,color}: any)=>(<div style={{height:5,background:C.border,borderRadius:3,marginBottom:9}}><div style={{height:5,borderRadius:3,width:`${Math.min(score,100)}%`,background:color}}/></div>);
 
-function Toasts({toasts}){
+function Toasts({toasts}: any){
   return(
     <div style={{position:'fixed',bottom:20,right:20,zIndex:9999,display:'flex',flexDirection:'column',gap:8,pointerEvents:'none'}}>
-      {toasts.map(t=>(
+      {toasts.map((t: any)=>(
         <div key={t.id} style={{background:t.t==='error'?C.redBg:t.t==='info'?C.accentBg:C.greenBg,border:`1px solid ${t.t==='error'?C.red:t.t==='info'?C.accent:C.green}`,color:t.t==='error'?C.red:t.t==='info'?C.accent:C.green,padding:'10px 16px',borderRadius:9,fontSize:12,fontWeight:600,maxWidth:300,boxShadow:'0 4px 20px rgba(0,0,0,0.4)'}}>
           {t.t==='error'?'✗':t.t==='info'?'ℹ':'✓'} {t.msg}
         </div>
@@ -108,8 +184,8 @@ function Toasts({toasts}){
   );
 }
 
-// ── LANDING ─────────────────────────────────────────────────────────────────
-function Landing({nav}){
+// ── LANDING ───────────────────────────────────────────────────────────────────
+function Landing({nav}: any){
   const feats=[{i:'🏛',t:'Санкционный скрининг',d:'OFAC SDN/SSI, пакеты ЕС 14+, UK OFSI, UN, BIS Entity List — проверка в реальном времени'},{i:'📦',t:'Экспортный контроль',d:'ТН ВЭД, dual-use, лицензионные риски ФСТЭК, End-User Certificate, EU Reg. 2021/821'},{i:'🔗',t:'UBO / Правило 50%',d:'Анализ бенефициаров, цепочка контроля, косвенная принадлежность подсанкционным лицам'},{i:'💳',t:'Платёжный коридор',d:'Санкционный профиль банков-корреспондентов, риск блокировки, 173-ФЗ'},{i:'🗺',t:'Маршрут / антиобход',d:'Red flags транзитных юрисдикций, Shadow Fleet, Common High Priority Items'},{i:'📄',t:'Комплаенс-досье',d:'Evidence trail с печатью: нормы, источники, red flags, audit log для банка и суда'}];
   const pricing=[{n:'Старт',p:'4 900 ₽',per:'/мес',f:['5 проверок сделок','Базовый санкционный скрининг','Комплаенс-досье PDF','Email поддержка'],hi:false},{n:'Бизнес',p:'14 900 ₽',per:'/мес',f:['30 проверок сделок','Полный 6-модульный анализ','UBO и Правило 50%','Платёжный коридор и антиобход','API доступ'],hi:true},{n:'Корпоратив',p:'По запросу',per:'',f:['Безлимитные проверки','White-label решение','Интеграция с CRM/ERP','Юридическое сопровождение'],hi:false}];
   return(
@@ -145,20 +221,6 @@ function Landing({nav}){
           {feats.map(f=><Card key={f.t} style={{padding:22}}><div style={{fontSize:26,marginBottom:10}}>{f.i}</div><div style={{fontWeight:700,marginBottom:7,fontSize:14}}>{f.t}</div><div style={{color:C.muted,fontSize:12,lineHeight:1.6}}>{f.d}</div></Card>)}
         </div>
       </section>
-      <section style={{padding:'48px 40px',background:`linear-gradient(135deg,${C.card},${C.bg})`,borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`}}>
-        <div style={{maxWidth:860,margin:'0 auto'}}>
-          <h2 style={{textAlign:'center',fontSize:28,fontWeight:800,marginBottom:8}}>Правовая матрица</h2>
-          <p style={{textAlign:'center',color:C.muted,marginBottom:32,fontSize:13}}>Aegis проверяет сделку одновременно по российскому и международному праву</p>
-          <div style={{overflowX:'auto'}}>
-            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-              <thead><tr style={{borderBottom:`1px solid ${C.border}`}}>{['Российское право','Международный режим','Что проверяет Aegis'].map(h=><th key={h} style={{padding:'10px 12px',textAlign:'left',color:C.muted,fontWeight:600}}>{h}</th>)}</tr></thead>
-              <tbody>{[['173-ФЗ (валютный контроль)','—','Допустимость расчётов, документы для банка, риск блокировки'],['183-ФЗ (экспортный контроль)','EU Reg. 2021/821 / BIS','Dual-use статус, лицензия ФСТЭК, End-User Certificate'],['115-ФЗ (AML/KYC)','FATF рекомендации','KYC-профиль, подозрительные транзакции'],['КоАП ст. 16.3','OFAC SDN / ЕС / UK / UN','Санкционный скрининг, Правило 50%, вторичные санкции'],['УК РФ ст. 189','OFAC / ЕС AML','Риск незаконного экспорта, dual-use + военный конечный пользователь']].map((r,i)=>(
-                <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>{r.map((cell,j)=><td key={j} style={{padding:'10px 12px',color:j<2?C.muted:C.text,fontWeight:j===2?500:400}}>{cell}</td>)}</tr>
-              ))}</tbody>
-            </table>
-          </div>
-        </div>
-      </section>
       <section style={{padding:'52px 40px',maxWidth:940,margin:'0 auto'}}>
         <h2 style={{textAlign:'center',fontSize:28,fontWeight:800,marginBottom:8}}>Тарифы</h2>
         <p style={{textAlign:'center',color:C.muted,marginBottom:36,fontSize:13}}>Экспертиза уровня Big4 — по цене, доступной МСП</p>
@@ -187,18 +249,41 @@ function Landing({nav}){
   );
 }
 
-// ── AUTH ────────────────────────────────────────────────────────────────────
-function Auth({nav,setUser,toast}){
+// ── AUTH ──────────────────────────────────────────────────────────────────────
+function Auth({nav,setUser,toast}: any){
+  const {setTokens} = useContext(AuthContext);
   const [mode,setMode]=useState('login');
   const [email,setEmail]=useState('');const [pass,setPass]=useState('');
   const [name,setName]=useState('');const [company,setCompany]=useState('');
   const [err,setErr]=useState('');const [loading,setLoading]=useState(false);
+
   const go=async()=>{
     if(!email||!pass){setErr('Заполните все поля');return;}
-    setLoading(true);await new Promise(r=>setTimeout(r,600));
-    setUser({name:name||email.split('@')[0],email,company:company||'Моя компания'});
-    toast('Добро пожаловать!');nav('dashboard');setLoading(false);
+    setLoading(true);setErr('');
+    try {
+      const endpoint = mode==='login' ? '/auth/login' : '/auth/register';
+      const body: any = { email, password: pass };
+      if (mode==='register') { body.name = name||email.split('@')[0]; body.company = company||''; }
+
+      const res = await fetch(`${API}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { setErr(data.error||'Ошибка авторизации'); return; }
+
+      setTokens({ accessToken: data.accessToken, refreshToken: data.refreshToken });
+      setUser(data.user);
+      toast('Добро пожаловать!');
+      nav('dashboard');
+    } catch {
+      setErr('Ошибка соединения с сервером');
+    } finally {
+      setLoading(false);
+    }
   };
+
   return(
     <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:`radial-gradient(ellipse at 50% 30%,rgba(75,200,255,0.06) 0%,transparent 65%)`}}>
       <div style={{width:380}}>
@@ -217,8 +302,8 @@ function Auth({nav,setUser,toast}){
   );
 }
 
-// ── SHELL ───────────────────────────────────────────────────────────────────
-function Shell({user,view,nav,logout,children}){
+// ── SHELL ─────────────────────────────────────────────────────────────────────
+function Shell({user,view,nav,logout,children}: any){
   const items=[{id:'dashboard',i:'⊞',l:'Обзор'},{id:'check',i:'🔍',l:'Новая проверка'},{id:'history',i:'📋',l:'История'},{id:'settings',i:'⚙',l:'Настройки'}];
   return(
     <div style={{display:'flex',minHeight:'100vh'}}>
@@ -242,10 +327,10 @@ function Shell({user,view,nav,logout,children}){
   );
 }
 
-// ── DASHBOARD ───────────────────────────────────────────────────────────────
-function Dashboard({nav,history,user}){
-  const total=history.length,highs=history.filter(h=>h.result?.overall==='HIGH').length,appr=history.filter(h=>h.result?.verdict==='APPROVED').length,caut=history.filter(h=>h.result?.verdict==='CAUTION').length;
-  const chartData=history.slice(0,7).reverse().map((h,i)=>({name:`#${i+1}`,score:h.result?.score||0,color:h.result?.overall==='HIGH'?C.red:h.result?.overall==='MEDIUM'?C.amber:C.green}));
+// ── DASHBOARD ─────────────────────────────────────────────────────────────────
+function Dashboard({nav,history,user}: any){
+  const total=history.length,highs=history.filter((h: any)=>h.result?.overall==='HIGH').length,appr=history.filter((h: any)=>h.result?.verdict==='APPROVED').length,caut=history.filter((h: any)=>h.result?.verdict==='CAUTION').length;
+  const chartData=history.slice(0,7).reverse().map((h: any,i: number)=>({name:`#${i+1}`,score:h.result?.score||0,color:h.result?.overall==='HIGH'?C.red:h.result?.overall==='MEDIUM'?C.amber:C.green}));
   return(
     <div style={{padding:28}}>
       <h1 style={{fontSize:20,fontWeight:800,marginBottom:3}}>Добро пожаловать, {user.name} 👋</h1>
@@ -278,7 +363,7 @@ function Dashboard({nav,history,user}){
             <BarChart data={chartData} margin={{top:0,right:0,left:0,bottom:0}}>
               <XAxis dataKey="name" tick={{fontSize:10,fill:C.muted}} axisLine={false} tickLine={false}/>
               <Bar dataKey="score" radius={[4,4,0,0]}>
-                {chartData.map((e,i)=><Cell key={i} fill={e.color}/>)}
+                {chartData.map((e: any,i: number)=><Cell key={i} fill={e.color}/>)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -290,10 +375,10 @@ function Dashboard({nav,history,user}){
             <h3 style={{fontWeight:700,fontSize:14}}>Последние проверки</h3>
             <span onClick={()=>nav('history')} style={{color:C.accent,fontSize:11,cursor:'pointer'}}>Все →</span>
           </div>
-          {history.slice(0,4).map((h,i)=>(
+          {history.slice(0,4).map((h: any,i: number)=>(
             <Card key={i} style={{marginBottom:7,padding:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
               <div><div style={{fontWeight:600,fontSize:13,marginBottom:2}}>{h.counterparty}</div><div style={{fontSize:10,color:C.muted}}>{h.country} · {(h.product||'').slice(0,48)}</div></div>
-              <div style={{display:'flex',gap:7,alignItems:'center'}}><Badge level={h.result?.overall}/><span style={{fontSize:9,color:C.muted}}>{new Date(h.date).toLocaleDateString('ru-RU')}</span></div>
+              <div style={{display:'flex',gap:7,alignItems:'center'}}><Badge level={h.result?.overall}/><span style={{fontSize:9,color:C.muted}}>{new Date(h.createdAt||h.date).toLocaleDateString('ru-RU')}</span></div>
             </Card>
           ))}
         </div>
@@ -303,14 +388,25 @@ function Dashboard({nav,history,user}){
   );
 }
 
-// ── CHECK FORM ──────────────────────────────────────────────────────────────
-function CheckForm({nav,setResult,addToHistory,toast,prefillForm,clearPrefill}){
+// ── CHECK FORM ────────────────────────────────────────────────────────────────
+function CheckForm({nav,setResult,setHistory,toast,prefillForm,clearPrefill}: any){
+  const {accessToken,refreshAccessToken} = useContext(AuthContext);
   const [step,setStep]=useState(1);
   const [f,setF]=useState({cp:'',country:'',ctype:'',reg:'',product:'',tnved:'',dual:'',enduse:'',ubo:'',uboCountry:'',ownership:'',currency:'',val:'',bank:'',payMethod:'',transit:'',vessel:'',finalDest:''});
   const [err,setErr]=useState('');const [loading,setLoading]=useState(false);
   const [loadStep,setLoadStep]=useState(-1);
-  useEffect(()=>{if(prefillForm){setF({...prefillForm});clearPrefill?.();toast('Данные предыдущей проверки загружены','info');}},[]); // eslint-disable-line
-  const upd=(k,v)=>setF(p=>({...p,[k]:v}));
+
+  useEffect(()=>{
+    if(prefillForm){
+      const fd = prefillForm.formData || prefillForm;
+      setF(prev=>({...prev,...fd}));
+      clearPrefill?.();
+      toast('Данные предыдущей проверки загружены','info');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  const upd=(k: string,v: string)=>setF(p=>({...p,[k]:v}));
   const STEPS=[{n:1,l:'Контрагент'},{n:2,l:'Товар'},{n:3,l:'Структура'},{n:4,l:'Платёж'},{n:5,l:'Маршрут'},{n:6,l:'Итог'}];
   const LSTEPS=['🏛 Санкционные списки OFAC / ЕС / UK / UN','📦 Экспортный контроль ФЗ-183 / ТН ВЭД','🔗 Структура бенефициаров / Правило 50%','💳 Платёжный коридор и банки','🗺 Маршрут / антиобход санкций'];
 
@@ -318,24 +414,25 @@ function CheckForm({nav,setResult,addToHistory,toast,prefillForm,clearPrefill}){
     setLoading(true);setErr('');setLoadStep(0);
     LSTEPS.forEach((_,i)=>setTimeout(()=>setLoadStep(i),i*900));
     try{
-      const resp=await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",max_tokens:2048,
-          system:`You are Aegis Comply AI — compliance engine for Russian double compliance.
-RULES: 1) Respond ONLY with JSON. 2) ALL text in Russian. 3) Keep each finding/flag/rec under 12 words. 4) No quotes inside text values. 5) No markdown, no backticks, no preamble.`,
-          messages:[{role:"user",content:`Analyze for compliance. Respond ONLY with this JSON (Russian text, short phrases):
-{"overall":"HIGH","score":75,"verdict":"BLOCKED","summary":"Two sentence summary","red_flags":["flag1","flag2","flag3"],"norms":["OFAC SDN","ФЗ-183","EU Reg 833/2014"],"modules":{"sanctions":{"risk":"HIGH","score":80,"findings":["finding1","finding2"]},"exportControl":{"risk":"MEDIUM","score":55,"findings":["finding1","finding2"]},"ubo":{"risk":"LOW","score":20,"findings":["finding1"]},"payment":{"risk":"HIGH","score":75,"findings":["finding1","finding2"]},"route":{"risk":"MEDIUM","score":50,"findings":["finding1"]}},"recs":["rec1","rec2","rec3"]}
-Data: Counterparty=${f.cp}, Country=${f.country}, Type=${f.ctype||'n/a'}, Reg=${f.reg||'n/a'}, Product=${f.product}, HS=${f.tnved||'n/a'}, DualUse=${f.dual||'unknown'}, Enduse=${f.enduse||'n/a'}, UBO=${f.ubo||'n/a'}, UBOCountry=${f.uboCountry||'n/a'}, Ownership=${f.ownership||'n/a'}%, Currency=${f.currency||'n/a'}, Value=${f.val||'n/a'}, Bank=${f.bank||'n/a'}, Payment=${f.payMethod||'n/a'}, Transit=${f.transit||'direct'}, Vessel=${f.vessel||'n/a'}, FinalDest=${f.finalDest||f.country}`}]
-        })
-      });
-      const data=await resp.json();
-      const raw=data.content?.map(b=>b.type==='text'?b.text:'').join('').trim()||'';
-      const res=parseSafe(raw);
-      const rec={id:Date.now(),counterparty:f.cp,country:f.country,product:f.product,currency:f.currency,date:new Date().toISOString(),result:res,form:{...f}};
-      addToHistory(rec);setResult({...res,checkRecord:rec});
-      toast('Проверка завершена');nav('result');
-    }catch(e){setErr('Ошибка: '+(e.message||'попробуйте снова'));toast('Ошибка анализа','error');}
+      const res = await apiFetch('/checks', {
+        method: 'POST',
+        body: JSON.stringify(f),
+      }, accessToken, refreshAccessToken);
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Ошибка сервера');
+      }
+
+      const check = await res.json();
+      setHistory((prev: any[]) => [check, ...prev]);
+      setResult({ ...check.result, checkRecord: check });
+      toast('Проверка завершена');
+      nav('result');
+    } catch(e: any) {
+      setErr('Ошибка: '+(e.message||'попробуйте снова'));
+      toast('Ошибка анализа','error');
+    }
     setLoading(false);setLoadStep(-1);
   };
 
@@ -361,53 +458,53 @@ Data: Counterparty=${f.cp}, Country=${f.country}, Type=${f.ctype||'n/a'}, Reg=${
       <Card style={{padding:22}}>
         {step===1&&<div>
           <div style={{fontWeight:700,marginBottom:14,fontSize:14}}>① Данные контрагента</div>
-          <Inp label="Наименование контрагента" value={f.cp} onChange={v=>upd('cp',v)} placeholder="HUAWEI TECHNOLOGIES CO., LTD." req/>
-          <Sel label="Страна регистрации" value={f.country} onChange={v=>upd('country',v)} options={COUNTRIES} req/>
+          <Inp label="Наименование контрагента" value={f.cp} onChange={(v: string)=>upd('cp',v)} placeholder="HUAWEI TECHNOLOGIES CO., LTD." req/>
+          <Sel label="Страна регистрации" value={f.country} onChange={(v: string)=>upd('country',v)} options={COUNTRIES} req/>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <Sel label="Тип юр. лица" value={f.ctype} onChange={v=>upd('ctype',v)} options={CTYPES}/>
-            <Inp label="Рег. номер / ИНН" value={f.reg} onChange={v=>upd('reg',v)} placeholder="Номер в реестре"/>
+            <Sel label="Тип юр. лица" value={f.ctype} onChange={(v: string)=>upd('ctype',v)} options={CTYPES}/>
+            <Inp label="Рег. номер / ИНН" value={f.reg} onChange={(v: string)=>upd('reg',v)} placeholder="Номер в реестре"/>
           </div>
         </div>}
         {step===2&&<div>
           <div style={{fontWeight:700,marginBottom:14,fontSize:14}}>② Товар / Технология</div>
-          <Inp label="Описание товара" value={f.product} onChange={v=>upd('product',v)} placeholder="Промышленные микропроцессоры Intel Xeon 64-бит" req/>
+          <Inp label="Описание товара" value={f.product} onChange={(v: string)=>upd('product',v)} placeholder="Промышленные микропроцессоры Intel Xeon 64-бит" req/>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <Inp label="Код ТН ВЭД" value={f.tnved} onChange={v=>upd('tnved',v)} placeholder="8542310000" hint="10-значный код"/>
-            <Sel label="Двойное назначение" value={f.dual} onChange={v=>upd('dual',v)} options={[{v:'NO',l:'Нет — гражданское'},{v:'POSSIBLE',l:'Возможно — уточнить'},{v:'YES',l:'Да — двойное'}]}/>
+            <Inp label="Код ТН ВЭД" value={f.tnved} onChange={(v: string)=>upd('tnved',v)} placeholder="8542310000" hint="10-значный код"/>
+            <Sel label="Двойное назначение" value={f.dual} onChange={(v: string)=>upd('dual',v)} options={[{v:'NO',l:'Нет — гражданское'},{v:'POSSIBLE',l:'Возможно — уточнить'},{v:'YES',l:'Да — двойное'}]}/>
           </div>
-          <Inp label="Конечное использование / пользователь" value={f.enduse} onChange={v=>upd('enduse',v)} placeholder="Гражданское производство / телеком / оборонный сектор"/>
+          <Inp label="Конечное использование / пользователь" value={f.enduse} onChange={(v: string)=>upd('enduse',v)} placeholder="Гражданское производство / телеком / оборонный сектор"/>
         </div>}
         {step===3&&<div>
           <div style={{fontWeight:700,marginBottom:4,fontSize:14}}>③ Корпоративная структура / UBO</div>
           <div style={{color:C.muted,fontSize:11,marginBottom:12}}>Правило 50% OFAC — если подсанкционное лицо владеет ≥50%, компания считается подсанкционной</div>
-          <Inp label="Бенефициарный владелец (UBO)" value={f.ubo} onChange={v=>upd('ubo',v)} placeholder="ФИО или наименование холдинга"/>
+          <Inp label="Бенефициарный владелец (UBO)" value={f.ubo} onChange={(v: string)=>upd('ubo',v)} placeholder="ФИО или наименование холдинга"/>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <Sel label="Страна UBO" value={f.uboCountry} onChange={v=>upd('uboCountry',v)} options={COUNTRIES}/>
-            <Inp label="Доля участия (%)" value={f.ownership} onChange={v=>upd('ownership',v)} placeholder="Например: 75"/>
+            <Sel label="Страна UBO" value={f.uboCountry} onChange={(v: string)=>upd('uboCountry',v)} options={COUNTRIES}/>
+            <Inp label="Доля участия (%)" value={f.ownership} onChange={(v: string)=>upd('ownership',v)} placeholder="Например: 75"/>
           </div>
         </div>}
         {step===4&&<div>
           <div style={{fontWeight:700,marginBottom:4,fontSize:14}}>④ Платёжный коридор</div>
           <div style={{color:C.muted,fontSize:11,marginBottom:12}}>Риск блокировки банком-корреспондентом — ключевой фактор вторичных санкций</div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <Sel label="Валюта расчёта" value={f.currency} onChange={v=>upd('currency',v)} options={CURRENCIES}/>
-            <Inp label="Сумма сделки" value={f.val} onChange={v=>upd('val',v)} placeholder="50 000 USD"/>
+            <Sel label="Валюта расчёта" value={f.currency} onChange={(v: string)=>upd('currency',v)} options={CURRENCIES}/>
+            <Inp label="Сумма сделки" value={f.val} onChange={(v: string)=>upd('val',v)} placeholder="50 000 USD"/>
           </div>
-          <Inp label="Банк для расчётов" value={f.bank} onChange={v=>upd('bank',v)} placeholder="DenizBank, Промсвязьбанк, ВТБ..."/>
-          <Sel label="Способ расчёта" value={f.payMethod} onChange={v=>upd('payMethod',v)} options={[{v:'SWIFT',l:'SWIFT'},{v:'SPFS',l:'СПФС'},{v:'CIPS',l:'CIPS (Китай)'},{v:'LC',l:'Аккредитив (L/C)'},{v:'ADVANCE',l:'Авансовый платёж'},{v:'CRYPTO',l:'Крипто/иное'}]}/>
+          <Inp label="Банк для расчётов" value={f.bank} onChange={(v: string)=>upd('bank',v)} placeholder="DenizBank, Промсвязьбанк, ВТБ..."/>
+          <Sel label="Способ расчёта" value={f.payMethod} onChange={(v: string)=>upd('payMethod',v)} options={[{v:'SWIFT',l:'SWIFT'},{v:'SPFS',l:'СПФС'},{v:'CIPS',l:'CIPS (Китай)'},{v:'LC',l:'Аккредитив (L/C)'},{v:'ADVANCE',l:'Авансовый платёж'},{v:'CRYPTO',l:'Крипто/иное'}]}/>
         </div>}
         {step===5&&<div>
           <div style={{fontWeight:700,marginBottom:4,fontSize:14}}>⑤ Маршрут / Антиобход санкций</div>
           <div style={{color:C.muted,fontSize:11,marginBottom:12}}>Транзитные юрисдикции — главный red flag при проверках ЕС/США на антиобход</div>
-          <Inp label="Транзитные страны / маршрут" value={f.transit} onChange={v=>upd('transit',v)} placeholder="Турция → ОАЭ → Казахстан"/>
-          <Inp label="Перевозчик / судно / логист" value={f.vessel} onChange={v=>upd('vessel',v)} placeholder="Название судна, авиаперевозчик..."/>
-          <Sel label="Страна конечного назначения" value={f.finalDest} onChange={v=>upd('finalDest',v)} options={COUNTRIES}/>
+          <Inp label="Транзитные страны / маршрут" value={f.transit} onChange={(v: string)=>upd('transit',v)} placeholder="Турция → ОАЭ → Казахстан"/>
+          <Inp label="Перевозчик / судно / логист" value={f.vessel} onChange={(v: string)=>upd('vessel',v)} placeholder="Название судна, авиаперевозчик..."/>
+          <Sel label="Страна конечного назначения" value={f.finalDest} onChange={(v: string)=>upd('finalDest',v)} options={COUNTRIES}/>
           <div style={{background:C.bgDeep,borderRadius:7,padding:'9px 12px',fontSize:11,color:C.muted,borderLeft:`3px solid ${C.red}`}}>🚩 Common High Priority Items: товары требуют усиленной проверки конечного пользователя</div>
         </div>}
         {step===6&&<div>
           <div style={{fontWeight:700,marginBottom:12,fontSize:14}}>⑥ Подтвердите данные</div>
           <div style={{background:C.bgDeep,borderRadius:8,padding:14,marginBottom:14}}>
-            {[['Контрагент',f.cp],['Страна',COUNTRIES.find(c=>c.v===f.country)?.l||f.country],['Тип / рег.',`${f.ctype||'—'} / ${f.reg||'—'}`],['Товар',f.product],['ТН ВЭД',f.tnved||'—'],['Двойн. назнач.',f.dual||'—'],['UBO',f.ubo||'—'],['Доля UBO',f.ownership?f.ownership+'%':'—'],['Валюта / сумма',`${f.currency||'—'} / ${f.val||'—'}`],['Банк',f.bank||'—'],['Способ расчёта',f.payMethod||'—'],['Транзит',f.transit||'прямая'],['Перевозчик',f.vessel||'—']].filter(([,v])=>v&&v!=='—').map(([k,v])=>(
+            {([['Контрагент',f.cp],['Страна',COUNTRIES.find(c=>c.v===f.country)?.l||f.country],['Тип / рег.',`${f.ctype||'—'} / ${f.reg||'—'}`],['Товар',f.product],['ТН ВЭД',f.tnved||'—'],['Двойн. назнач.',f.dual||'—'],['UBO',f.ubo||'—'],['Доля UBO',f.ownership?f.ownership+'%':'—'],['Валюта / сумма',`${f.currency||'—'} / ${f.val||'—'}`],['Банк',f.bank||'—'],['Способ расчёта',f.payMethod||'—'],['Транзит',f.transit||'прямая'],['Перевозчик',f.vessel||'—']] as [string,string][]).filter(([,v])=>v&&v!=='—').map(([k,v])=>(
               <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:`1px solid ${C.border}`,fontSize:12}}>
                 <span style={{color:C.muted,flexShrink:0}}>{k}</span>
                 <span style={{fontWeight:600,maxWidth:260,textAlign:'right',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginLeft:8}}>{v}</span>
@@ -438,15 +535,14 @@ Data: Counterparty=${f.cp}, Country=${f.country}, Type=${f.ctype||'n/a'}, Reg=${
   );
 }
 
-// ── RESULT ──────────────────────────────────────────────────────────────────
-function Result({nav,result,toast}){
+// ── RESULT ────────────────────────────────────────────────────────────────────
+function Result({nav,result,toast}: any){
   const [tab,setTab]=useState('analysis');
-  const vp=VP[result.verdict]||VP.CAUTION;
-  const sc=s=>s<30?C.green:s<60?C.amber:C.red;
+  const vp=VP[result.verdict as keyof typeof VP]||VP.CAUTION;
+  const sc=(s: number)=>s<30?C.green:s<60?C.amber:C.red;
   const cr=result.checkRecord;
-  const date=cr?new Date(cr.date).toLocaleString('ru-RU'):'—';
-  const radarData=Object.entries(result.modules||{}).map(([k,m])=>({subject:{sanctions:'Санкции',exportControl:'Экспорт',ubo:'UBO',payment:'Платёж',route:'Маршрут'}[k]||k,score:m.score||0,fullMark:100}));
-
+  const date=cr?new Date(cr.createdAt||cr.date).toLocaleString('ru-RU'):'—';
+  const radarData=Object.entries(result.modules||{}).map(([k,m]: any)=>({subject:{sanctions:'Санкции',exportControl:'Экспорт',ubo:'UBO',payment:'Платёж',route:'Маршрут'}[k as string]||k,score:m.score||0,fullMark:100}));
   return(
     <div style={{padding:28,maxWidth:820}}>
       <span onClick={()=>nav('dashboard')} style={{color:C.muted,cursor:'pointer',fontSize:11,display:'block',marginBottom:7}}>← К обзору</span>
@@ -458,7 +554,6 @@ function Result({nav,result,toast}){
           <Btn onClick={()=>printDossier(result,cr)} v="success" style={{fontSize:11,padding:'7px 12px'}}>🖨 Печать PDF</Btn>
         </div>
       </div>
-
       <Card style={{padding:22,marginBottom:14,border:`2px solid ${vp.c}`,background:vp.bg}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:14}}>
           <div style={{flex:1}}>
@@ -474,140 +569,76 @@ function Result({nav,result,toast}){
           </div>
         </div>
       </Card>
-
       {(result.red_flags?.length>0||result.norms?.length>0)&&(
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
-          {result.red_flags?.length>0&&(
-            <Card style={{padding:14}}>
-              <div style={{fontWeight:700,fontSize:11,marginBottom:8,color:C.red}}>🚩 Red flags</div>
-              {result.red_flags.map((f,i)=><div key={i} style={{fontSize:11,color:C.muted,padding:'3px 0',borderBottom:`1px solid ${C.border}`,display:'flex',gap:5}}><span style={{color:C.red,flexShrink:0}}>!</span>{f}</div>)}
-            </Card>
-          )}
-          {result.norms?.length>0&&(
-            <Card style={{padding:14}}>
-              <div style={{fontWeight:700,fontSize:11,marginBottom:8,color:C.purple}}>📐 Применимые нормы</div>
-              {result.norms.map((n,i)=><div key={i} style={{fontSize:11,color:C.muted,padding:'3px 0',borderBottom:`1px solid ${C.border}`,display:'flex',gap:5}}><span style={{color:C.purple,flexShrink:0}}>§</span>{n}</div>)}
-            </Card>
-          )}
+          {result.red_flags?.length>0&&(<Card style={{padding:14}}><div style={{fontWeight:700,fontSize:11,marginBottom:8,color:C.red}}>🚩 Red flags</div>{result.red_flags.map((f: string,i: number)=><div key={i} style={{fontSize:11,color:C.muted,padding:'3px 0',borderBottom:`1px solid ${C.border}`,display:'flex',gap:5}}><span style={{color:C.red,flexShrink:0}}>!</span>{f}</div>)}</Card>)}
+          {result.norms?.length>0&&(<Card style={{padding:14}}><div style={{fontWeight:700,fontSize:11,marginBottom:8,color:C.purple}}>📐 Применимые нормы</div>{result.norms.map((n: string,i: number)=><div key={i} style={{fontSize:11,color:C.muted,padding:'3px 0',borderBottom:`1px solid ${C.border}`,display:'flex',gap:5}}><span style={{color:C.purple,flexShrink:0}}>§</span>{n}</div>)}</Card>)}
         </div>
       )}
-
       <div style={{display:'flex',gap:4,marginBottom:12}}>
         {[{id:'analysis',l:'Детальный анализ'},{id:'radar',l:'Визуализация рисков'},{id:'dossier',l:'Комплаенс-досье'}].map(t=>(
           <div key={t.id} onClick={()=>setTab(t.id)} style={{padding:'7px 14px',borderRadius:7,cursor:'pointer',fontSize:12,fontWeight:tab===t.id?700:400,background:tab===t.id?C.accentBg:C.card,color:tab===t.id?C.accent:C.muted,border:`1px solid ${tab===t.id?C.borderHi:C.border}`}}>{t.l}</div>
         ))}
       </div>
-
-      {tab==='analysis'&&(
-        <>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:12,marginBottom:14}}>
-            {Object.entries(result.modules||{}).map(([k,m])=>{
-              const col=sc(m.score||0);
-              return(
-                <Card key={k} style={{padding:16}}>
-                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div style={{fontWeight:700,fontSize:11}}>{ML[k]||k}</div><Badge level={m.risk}/></div>
-                  <Bar score={m.score||0} color={col}/>
-                  {(m.findings||[]).map((fd,i)=>(
-                    <div key={i} style={{fontSize:11,color:C.muted,padding:'2px 0',display:'flex',gap:5,lineHeight:1.4}}>
-                      <span style={{color:m.risk==='HIGH'?C.red:m.risk==='MEDIUM'?C.amber:C.green,flexShrink:0}}>{m.risk==='HIGH'?'⚠':m.risk==='MEDIUM'?'→':'✓'}</span>{fd}
-                    </div>
-                  ))}
-                </Card>
-              );
-            })}
-          </div>
-          {(result.recs||[]).length>0&&(
-            <Card style={{padding:18,marginBottom:14}}>
-              <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>💡 Рекомендации</div>
-              {result.recs.map((r,i)=><div key={i} style={{padding:'8px 12px',background:C.bgDeep,borderRadius:7,marginBottom:7,borderLeft:`3px solid ${C.accent}`,fontSize:12,color:C.muted,lineHeight:1.5}}>{i+1}. {r}</div>)}
-            </Card>
-          )}
-        </>
-      )}
-
-      {tab==='radar'&&(
-        <Card style={{padding:22,marginBottom:14}}>
-          <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>Профиль рисков по модулям</div>
-          <div style={{color:C.muted,fontSize:11,marginBottom:16}}>Чем больше площадь — тем выше совокупный риск сделки</div>
-          <ResponsiveContainer width="100%" height={280}>
-            <RadarChart data={radarData} margin={{top:10,right:30,bottom:10,left:30}}>
-              <PolarGrid stroke={C.border}/>
-              <PolarAngleAxis dataKey="subject" tick={{fill:C.muted,fontSize:12}}/>
-              <Radar name="Риск" dataKey="score" stroke={C.red} fill={C.red} fillOpacity={0.25} strokeWidth={2}/>
-            </RadarChart>
-          </ResponsiveContainer>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginTop:8}}>
-            {radarData.map(d=>(
-              <div key={d.subject} style={{textAlign:'center'}}>
-                <div style={{fontSize:16,fontWeight:900,color:sc(d.score)}}>{d.score}</div>
-                <div style={{fontSize:10,color:C.muted}}>{d.subject}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {tab==='dossier'&&(
-        <Card style={{padding:22,marginBottom:14}}>
-          <div style={{borderBottom:`1px solid ${C.border}`,paddingBottom:14,marginBottom:16}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-              <div style={{display:'flex',alignItems:'center',gap:10}}><Shield size={22}/><div><div style={{fontSize:13,fontWeight:800,letterSpacing:1}}>AEGIS COMPLY</div><div style={{fontSize:10,color:C.muted}}>Комплаенс-досье · evidence trail</div></div></div>
-              <div style={{textAlign:'right',fontSize:10,color:C.muted}}><div>ID: {cr?.id}</div><div>{date}</div></div>
-            </div>
-          </div>
-          <div style={{marginBottom:14}}>
-            <div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Объект проверки</div>
-            {[['Контрагент',cr?.counterparty],['Страна',cr?.country],['Товар',cr?.form?.product],['ТН ВЭД',cr?.form?.tnved||'н/у'],['Валюта / сумма',`${cr?.form?.currency||'—'} / ${cr?.form?.val||'—'}`],['Транзит',cr?.form?.transit||'прямая'],['Банк',cr?.form?.bank||'н/у'],['UBO',cr?.form?.ubo||'н/у']].map(([k,v])=>v&&(
-              <div key={k} style={{display:'flex',gap:10,padding:'5px 0',borderBottom:`1px solid ${C.border}`,fontSize:11}}><span style={{color:C.muted,minWidth:90,flexShrink:0}}>{k}</span><span style={{fontWeight:500}}>{v}</span></div>
-            ))}
-          </div>
-          <div style={{marginBottom:14}}>
-            <div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Вердикт</div>
-            <div style={{display:'inline-flex',alignItems:'center',gap:8,background:vp.bg,border:`1px solid ${vp.c}`,borderRadius:8,padding:'8px 14px'}}>
-              <span style={{fontSize:18,color:vp.c}}>{vp.i}</span><span style={{fontWeight:700,color:vp.c,fontSize:13}}>{vp.l}</span><span style={{color:C.muted,fontSize:11}}>· Скор: {result.score||0}/100</span>
-            </div>
-          </div>
-          {result.red_flags?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Риск-факторы</div>{result.red_flags.map((f,i)=><div key={i} style={{fontSize:11,padding:'4px 0',color:C.text}}>• {f}</div>)}</div>}
-          {result.norms?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Применимые нормы</div><div style={{display:'flex',flexWrap:'wrap',gap:5}}>{result.norms.map((n,i)=><span key={i} style={{background:C.purpleBg,color:C.purple,border:`1px solid ${C.purple}`,padding:'2px 8px',borderRadius:12,fontSize:10}}>§ {n}</span>)}</div></div>}
-          {result.recs?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Рекомендации</div>{result.recs.map((r,i)=><div key={i} style={{fontSize:11,padding:'3px 0',color:C.muted}}>• {r}</div>)}</div>}
-          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12,fontSize:10,color:C.muted,lineHeight:1.6}}><strong style={{color:C.text}}>Disclaimer:</strong> Сформировано AI-агентом Aegis Comply как система поддержки принятия решений. Не является юридическим заключением. Принцип human-in-the-loop соблюдён. Aegis Comply © 2025.</div>
-        </Card>
-      )}
+      {tab==='analysis'&&(<>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:12,marginBottom:14}}>
+          {Object.entries(result.modules||{}).map(([k,m]: any)=>{
+            const col=sc(m.score||0);
+            return(<Card key={k} style={{padding:16}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div style={{fontWeight:700,fontSize:11}}>{(ML as any)[k]||k}</div><Badge level={m.risk}/></div><BarViz score={m.score||0} color={col}/>{(m.findings||[]).map((fd: string,i: number)=>(<div key={i} style={{fontSize:11,color:C.muted,padding:'2px 0',display:'flex',gap:5,lineHeight:1.4}}><span style={{color:m.risk==='HIGH'?C.red:m.risk==='MEDIUM'?C.amber:C.green,flexShrink:0}}>{m.risk==='HIGH'?'⚠':m.risk==='MEDIUM'?'→':'✓'}</span>{fd}</div>))}</Card>);
+          })}
+        </div>
+        {(result.recs||[]).length>0&&(<Card style={{padding:18,marginBottom:14}}><div style={{fontWeight:700,fontSize:13,marginBottom:12}}>💡 Рекомендации</div>{result.recs.map((r: string,i: number)=><div key={i} style={{padding:'8px 12px',background:C.bgDeep,borderRadius:7,marginBottom:7,borderLeft:`3px solid ${C.accent}`,fontSize:12,color:C.muted,lineHeight:1.5}}>{i+1}. {r}</div>)}</Card>)}
+      </>)}
+      {tab==='radar'&&(<Card style={{padding:22,marginBottom:14}}><div style={{fontWeight:700,fontSize:13,marginBottom:4}}>Профиль рисков по модулям</div><div style={{color:C.muted,fontSize:11,marginBottom:16}}>Чем больше площадь — тем выше совокупный риск сделки</div><ResponsiveContainer width="100%" height={280}><RadarChart data={radarData} margin={{top:10,right:30,bottom:10,left:30}}><PolarGrid stroke={C.border}/><PolarAngleAxis dataKey="subject" tick={{fill:C.muted,fontSize:12}}/><Radar name="Риск" dataKey="score" stroke={C.red} fill={C.red} fillOpacity={0.25} strokeWidth={2}/></RadarChart></ResponsiveContainer><div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginTop:8}}>{radarData.map((d: any)=>(<div key={d.subject} style={{textAlign:'center'}}><div style={{fontSize:16,fontWeight:900,color:sc(d.score)}}>{d.score}</div><div style={{fontSize:10,color:C.muted}}>{d.subject}</div></div>))}</div></Card>)}
+      {tab==='dossier'&&(<Card style={{padding:22,marginBottom:14}}>
+        <div style={{borderBottom:`1px solid ${C.border}`,paddingBottom:14,marginBottom:16}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><div style={{display:'flex',alignItems:'center',gap:10}}><Shield size={22}/><div><div style={{fontSize:13,fontWeight:800,letterSpacing:1}}>AEGIS COMPLY</div><div style={{fontSize:10,color:C.muted}}>Комплаенс-досье · evidence trail</div></div></div><div style={{textAlign:'right',fontSize:10,color:C.muted}}><div>ID: {cr?.id}</div><div>{date}</div></div></div></div>
+        <div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Объект проверки</div>{([['Контрагент',cr?.counterparty],['Страна',cr?.country],['Товар',cr?.product||(cr?.formData?.product)],['ТН ВЭД',(cr?.formData?.tnved)||'н/у'],['Валюта / сумма',`${cr?.currency||(cr?.formData?.currency)||'—'} / ${(cr?.formData?.val)||'—'}`],['Транзит',(cr?.formData?.transit)||'прямая'],['Банк',(cr?.formData?.bank)||'н/у'],['UBO',(cr?.formData?.ubo)||'н/у']] as [string,string][]).map(([k,v])=>v&&(<div key={k} style={{display:'flex',gap:10,padding:'5px 0',borderBottom:`1px solid ${C.border}`,fontSize:11}}><span style={{color:C.muted,minWidth:90,flexShrink:0}}>{k}</span><span style={{fontWeight:500}}>{v}</span></div>))}</div>
+        <div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Вердикт</div><div style={{display:'inline-flex',alignItems:'center',gap:8,background:vp.bg,border:`1px solid ${vp.c}`,borderRadius:8,padding:'8px 14px'}}><span style={{fontSize:18,color:vp.c}}>{vp.i}</span><span style={{fontWeight:700,color:vp.c,fontSize:13}}>{vp.l}</span><span style={{color:C.muted,fontSize:11}}>· Скор: {result.score||0}/100</span></div></div>
+        {result.red_flags?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Риск-факторы</div>{result.red_flags.map((f: string,i: number)=><div key={i} style={{fontSize:11,padding:'4px 0',color:C.text}}>• {f}</div>)}</div>}
+        {result.norms?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Применимые нормы</div><div style={{display:'flex',flexWrap:'wrap',gap:5}}>{result.norms.map((n: string,i: number)=><span key={i} style={{background:C.purpleBg,color:C.purple,border:`1px solid ${C.purple}`,padding:'2px 8px',borderRadius:12,fontSize:10}}>§ {n}</span>)}</div></div>}
+        {result.recs?.length>0&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:C.muted,marginBottom:8,fontWeight:700,textTransform:'uppercase',letterSpacing:1}}>Рекомендации</div>{result.recs.map((r: string,i: number)=><div key={i} style={{fontSize:11,padding:'3px 0',color:C.muted}}>• {r}</div>)}</div>}
+        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12,fontSize:10,color:C.muted,lineHeight:1.6}}><strong style={{color:C.text}}>Disclaimer:</strong> Сформировано AI-агентом Aegis Comply как система поддержки принятия решений. Не является юридическим заключением. Принцип human-in-the-loop соблюдён. Aegis Comply © 2025.</div>
+      </Card>)}
     </div>
   );
 }
 
-// ── HISTORY ─────────────────────────────────────────────────────────────────
-function History({nav,history,setResult,toast}){
+// ── HISTORY ───────────────────────────────────────────────────────────────────
+function History({nav,history,setResult,toast,deleteCheck,rerunCheck,exportCSV}: any){
   const [filter,setFilter]=useState('ALL');
-  const filtered=filter==='ALL'?history:history.filter(h=>h.result?.overall===filter);
+  const filtered=filter==='ALL'?history:history.filter((h: any)=>h.result?.overall===filter);
   return(
     <div style={{padding:28}}>
-      <h1 style={{fontSize:20,fontWeight:800,marginBottom:3}}>История проверок</h1>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+        <h1 style={{fontSize:20,fontWeight:800}}>История проверок</h1>
+        <Btn onClick={exportCSV} v="outline" style={{fontSize:11,padding:'6px 12px'}}>⬇ CSV</Btn>
+      </div>
       <p style={{color:C.muted,marginBottom:18,fontSize:12}}>Все комплаенс-проверки · {history.length} записей</p>
       <div style={{display:'flex',gap:6,marginBottom:16}}>
         {['ALL','LOW','MEDIUM','HIGH'].map(f=>(
-          <div key={f} onClick={()=>setFilter(f)} style={{padding:'5px 12px',borderRadius:20,cursor:'pointer',fontSize:11,fontWeight:600,background:filter===f?(f==='ALL'?C.accentBg:RP[f]?.bg||C.accentBg):C.card,color:filter===f?(f==='ALL'?C.accent:RP[f]?.c||C.accent):C.muted,border:`1px solid ${filter===f?(f==='ALL'?C.accent:RP[f]?.c||C.accent):C.border}`}}>
-            {f==='ALL'?'Все':RP[f]?.l||f}
+          <div key={f} onClick={()=>setFilter(f)} style={{padding:'5px 12px',borderRadius:20,cursor:'pointer',fontSize:11,fontWeight:600,background:filter===f?(f==='ALL'?C.accentBg:(RP as any)[f]?.bg||C.accentBg):C.card,color:filter===f?(f==='ALL'?C.accent:(RP as any)[f]?.c||C.accent):C.muted,border:`1px solid ${filter===f?(f==='ALL'?C.accent:(RP as any)[f]?.c||C.accent):C.border}`}}>
+            {f==='ALL'?'Все':(RP as any)[f]?.l||f}
           </div>
         ))}
       </div>
       {!filtered.length?(<Card style={{textAlign:'center',padding:40}}><div style={{fontSize:36,marginBottom:12}}>📋</div><div style={{color:C.muted,marginBottom:18,fontSize:12}}>{history.length?'Нет проверок с таким фильтром':'Проверок пока нет'}</div><Btn onClick={()=>nav('check')}>Начать проверку</Btn></Card>):(
-        filtered.map((h,i)=>{
-          const vp=VP[h.result?.verdict]||VP.CAUTION;
+        filtered.map((h: any,i: number)=>{
+          const vp=VP[h.result?.verdict as keyof typeof VP]||VP.CAUTION;
           return(
             <Card key={i} style={{marginBottom:8,padding:16}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
                 <div style={{flex:1,minWidth:180}}>
                   <div style={{fontWeight:700,marginBottom:2,fontSize:13}}>{h.counterparty}</div>
                   <div style={{fontSize:11,color:C.muted,marginBottom:3}}>{h.country} · {(h.product||'').slice(0,55)}{(h.product||'').length>55?'...':''}</div>
-                  <div style={{fontSize:10,color:C.muted}}>{new Date(h.date).toLocaleString('ru-RU')}</div>
+                  <div style={{fontSize:10,color:C.muted}}>{new Date(h.createdAt||h.date).toLocaleString('ru-RU')}</div>
                 </div>
                 <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
                   <Badge level={h.result?.overall}/>
                   <span style={{fontSize:11,color:vp.c,fontWeight:600}}>{vp.i} {h.result?.verdict}</span>
                   <Btn onClick={()=>{setResult({...h.result,checkRecord:h});nav('result');}} v="outline" style={{padding:'4px 10px',fontSize:10}}>Открыть</Btn>
-                  <Btn onClick={()=>{printDossier(h.result,h);toast('Открываем печать...','info');}} v="ghost" style={{padding:'4px 8px',fontSize:10}}>🖨</Btn>
+                  <Btn onClick={()=>rerunCheck(h)} v="ghost" style={{padding:'4px 8px',fontSize:10}}>↺</Btn>
+                  <Btn onClick={()=>printDossier(h.result,h)} v="ghost" style={{padding:'4px 8px',fontSize:10}}>🖨</Btn>
+                  {deleteCheck&&<Btn onClick={()=>deleteCheck(h.id)} v="ghost" style={{padding:'4px 8px',fontSize:10,color:C.red}}>✕</Btn>}
                 </div>
               </div>
             </Card>
@@ -618,73 +649,109 @@ function History({nav,history,setResult,toast}){
   );
 }
 
-// ── SETTINGS ────────────────────────────────────────────────────────────────
-function Settings({user,setUser,toast}){
-  const [f,setF]=useState({name:user.name,company:user.company,email:user.email,inn:'',activity:''});
-  const upd=(k,v)=>setF(p=>({...p,[k]:v}));
-  const save=()=>{setUser(u=>({...u,name:f.name,company:f.company}));toast('Настройки сохранены');};
+// ── SETTINGS ──────────────────────────────────────────────────────────────────
+function Settings({user,setUser,toast}: any){
+  const {accessToken,refreshAccessToken} = useContext(AuthContext);
+  const [f,setF]=useState({name:user.name||'',company:user.company||'',email:user.email||'',inn:user.inn||'',activity:user.activity||''});
+  const upd=(k: string,v: string)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    try {
+      const res = await apiFetch('/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify({ name: f.name, company: f.company, inn: f.inn, activity: f.activity }),
+      }, accessToken, refreshAccessToken);
+      if (!res.ok) throw new Error();
+      const updated = await res.json();
+      setUser((u: any)=>({...u,...updated}));
+      toast('Настройки сохранены');
+    } catch { toast('Ошибка сохранения','error'); }
+  };
   return(
     <div style={{padding:28,maxWidth:560}}>
       <h1 style={{fontSize:20,fontWeight:800,marginBottom:3}}>Настройки</h1>
       <p style={{color:C.muted,marginBottom:24,fontSize:13}}>Профиль компании и параметры аккаунта</p>
       <Card style={{padding:22,marginBottom:16}}>
         <div style={{fontWeight:700,fontSize:14,marginBottom:16}}>Профиль пользователя</div>
-        <Inp label="Имя" value={f.name} onChange={v=>upd('name',v)} placeholder="Имя"/>
+        <Inp label="Имя" value={f.name} onChange={(v: string)=>upd('name',v)} placeholder="Имя"/>
         <Inp label="Email" value={f.email} onChange={()=>{}} placeholder="Email" type="email"/>
       </Card>
       <Card style={{padding:22,marginBottom:16}}>
         <div style={{fontWeight:700,fontSize:14,marginBottom:16}}>Данные компании</div>
-        <Inp label="Наименование компании" value={f.company} onChange={v=>upd('company',v)} placeholder="ООО Торговая компания"/>
-        <Inp label="ИНН компании" value={f.inn} onChange={v=>upd('inn',v)} placeholder="1234567890"/>
-        <Sel label="Вид деятельности" value={f.activity} onChange={v=>upd('activity',v)} options={[{v:'import',l:'Импортёр'},{v:'export',l:'Экспортёр'},{v:'both',l:'Импортёр и экспортёр'},{v:'broker',l:'Таможенный брокер / ВЭД-агент'},{v:'bank',l:'Финансовый посредник'},{v:'legal',l:'Юридическая фирма'}]}/>
+        <Inp label="Наименование компании" value={f.company} onChange={(v: string)=>upd('company',v)} placeholder="ООО Торговая компания"/>
+        <Inp label="ИНН компании" value={f.inn} onChange={(v: string)=>upd('inn',v)} placeholder="1234567890"/>
+        <Sel label="Вид деятельности" value={f.activity} onChange={(v: string)=>upd('activity',v)} options={[{v:'import',l:'Импортёр'},{v:'export',l:'Экспортёр'},{v:'both',l:'Импортёр и экспортёр'},{v:'broker',l:'Таможенный брокер / ВЭД-агент'},{v:'bank',l:'Финансовый посредник'},{v:'legal',l:'Юридическая фирма'}]}/>
       </Card>
       <Card style={{padding:22,marginBottom:16}}>
         <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>Тарифный план</div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 14px',background:C.accentBg,borderRadius:8,border:`1px solid ${C.borderHi}`}}>
-          <div><div style={{fontWeight:700,color:C.accent}}>Бизнес</div><div style={{fontSize:11,color:C.muted,marginTop:2}}>30 проверок в месяц · 6 модулей · API</div></div>
-          <div style={{fontWeight:700,fontSize:16,color:C.accent}}>14 900 ₽/мес</div>
+          <div><div style={{fontWeight:700,color:C.accent,textTransform:'capitalize'}}>{user.plan||'start'}</div><div style={{fontSize:11,color:C.muted,marginTop:2}}>Проверок осталось: {user.checksLeft ?? '—'}</div></div>
+          <div style={{fontWeight:700,fontSize:13,color:C.accent}}>{user.plan==='business'?'14 900 ₽/мес':user.plan==='enterprise'?'По запросу':'4 900 ₽/мес'}</div>
         </div>
-      </Card>
-      <Card style={{padding:18,marginBottom:16}}>
-        <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>Следующие шаги для production</div>
-        {[['🔐','Реальная JWT-авторизация','Замените mock на Node.js + bcrypt'],['🗄','PostgreSQL + RLS','Данные пользователей изолированы на уровне БД'],['🔑','API-ключ на сервере','Claude API Key хранить в .env, не на фронте'],['📤','Docker + деплой','docker-compose.yml: app + postgres + nginx']].map(([i,t,d])=>(
-          <div key={t} style={{display:'flex',gap:10,padding:'8px 0',borderBottom:`1px solid ${C.border}`,alignItems:'flex-start'}}>
-            <span style={{fontSize:16,flexShrink:0}}>{i}</span>
-            <div><div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{t}</div><div style={{fontSize:11,color:C.muted}}>{d}</div></div>
-          </div>
-        ))}
       </Card>
       <Btn onClick={save} style={{padding:'11px 28px'}}>Сохранить изменения</Btn>
     </div>
   );
 }
 
-// ── ROOT ────────────────────────────────────────────────────────────────────
-export default function App(){
+// ── ROOT ──────────────────────────────────────────────────────────────────────
+function AppInner() {
+  const {accessToken, refreshAccessToken, clearTokens} = useContext(AuthContext);
   const [view,setView]=useState('landing');
-  const [user,setUser]=useState(null);
-  const [result,setResult]=useState(null);
-  const [history,setHistory]=useState([]);
-  const [toasts,setToasts]=useState([]);
-  const [prefillForm,setPrefillForm]=useState(null);
+  const [user,setUser]=useState<any>(null);
+  const [result,setResult]=useState<any>(null);
+  const [history,setHistory]=useState<any[]>([]);
+  const [toasts,setToasts]=useState<any[]>([]);
+  const [prefillForm,setPrefillForm]=useState<any>(null);
 
-  useEffect(()=>{(async()=>{try{const r=await window.storage.get('aegis_h3');if(r)setHistory(JSON.parse(r.value));}catch{}})();},[]);
+  useEffect(()=>{
+    if (!accessToken) return;
+    (async()=>{
+      try {
+        const res = await apiFetch('/users/me', {}, accessToken, refreshAccessToken);
+        if (!res.ok) { clearTokens(); return; }
+        const u = await res.json();
+        setUser(u);
+        setView('dashboard');
+        const hr = await apiFetch('/checks?limit=50', {}, accessToken, refreshAccessToken);
+        if (hr.ok) { const hdata = await hr.json(); setHistory(hdata.data || []); }
+      } catch { clearTokens(); }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
 
-  const toast=(msg,t='success')=>{const id=Date.now();setToasts(p=>[...p,{id,msg,t}]);setTimeout(()=>setToasts(p=>p.filter(x=>x.id!==id)),3500);};
-  const addToHistory=(item)=>{const h=[item,...history].slice(0,50);setHistory(h);(async()=>{try{await window.storage.set('aegis_h3',JSON.stringify(h));}catch{}})();};
-  const deleteCheck=(id)=>{const h=history.filter(x=>x.id!==id);setHistory(h);(async()=>{try{await window.storage.set('aegis_h3',JSON.stringify(h));}catch{}})();toast('Проверка удалена');};
-  const rerunCheck=(form)=>{setPrefillForm({...form});setView('check');};
-  const exportCSV=()=>{
-    if(!history.length){toast('Нет данных для экспорта','error');return;}
-    const hdr=['ID','Дата','Контрагент','Страна','Товар','Вердикт','Риск-скор','Уровень'];
-    const rows=history.map(h=>[h.id,new Date(h.date).toLocaleString('ru-RU'),h.counterparty,h.country,h.product||'',h.result?.verdict||'',h.result?.score||0,h.result?.overall||'']);
-    const csv=[hdr,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
-    const b=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'});
-    const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='aegis_history.csv';a.click();URL.revokeObjectURL(u);
-    toast('CSV экспортирован');
+  const toast=(msg: string,t='success')=>{const id=Date.now();setToasts(p=>[...p,{id,msg,t}]);setTimeout(()=>setToasts(p=>p.filter((x: any)=>x.id!==id)),3500);};
+
+  const deleteCheck=async(id: string)=>{
+    await apiFetch(`/checks/${id}`,{method:'DELETE'},accessToken,refreshAccessToken);
+    setHistory(h=>h.filter((x: any)=>x.id!==id));
+    toast('Проверка удалена');
   };
-  const nav=(v)=>{if(!user&&['dashboard','check','history','result','settings'].includes(v)){setView('auth');return;}setView(v);};
-  const logout=()=>{setUser(null);setView('landing');};
+
+  const rerunCheck=(check: any)=>{ setPrefillForm(check); setView('check'); };
+
+  const exportCSV=async()=>{
+    try {
+      const res = await apiFetch('/checks/export/csv',{},accessToken,refreshAccessToken);
+      if (!res.ok) throw new Error();
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='aegis_checks.csv'; a.click();
+      URL.revokeObjectURL(url); toast('CSV экспортирован');
+    } catch { toast('Ошибка экспорта','error'); }
+  };
+
+  const nav=(v: string)=>{
+    if(!user&&['dashboard','check','history','result','settings'].includes(v)){setView('auth');return;}
+    setView(v);
+  };
+
+  const logout=async()=>{
+    const rt = localStorage.getItem('aegis_refresh');
+    if (rt && accessToken) {
+      await apiFetch('/auth/logout',{method:'POST',body:JSON.stringify({refreshToken:rt})},accessToken,refreshAccessToken).catch(()=>{});
+    }
+    clearTokens(); setUser(null); setHistory([]); setView('landing');
+  };
 
   return(
     <div style={{minHeight:'100vh',background:C.bg,color:C.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
@@ -693,7 +760,7 @@ export default function App(){
       {user&&(
         <Shell user={user} view={view} nav={nav} logout={logout}>
           {view==='dashboard'&&<Dashboard nav={nav} history={history} user={user}/>}
-          {view==='check'&&<CheckForm nav={nav} setResult={setResult} addToHistory={addToHistory} toast={toast} prefillForm={prefillForm} clearPrefill={()=>setPrefillForm(null)}/>}
+          {view==='check'&&<CheckForm nav={nav} setResult={setResult} setHistory={setHistory} toast={toast} prefillForm={prefillForm} clearPrefill={()=>setPrefillForm(null)}/>}
           {view==='result'&&result&&<Result nav={nav} result={result} toast={toast}/>}
           {view==='history'&&<History nav={nav} history={history} setResult={setResult} toast={toast} deleteCheck={deleteCheck} rerunCheck={rerunCheck} exportCSV={exportCSV}/>}
           {view==='settings'&&<Settings user={user} setUser={setUser} toast={toast}/>}
@@ -701,5 +768,13 @@ export default function App(){
       )}
       <Toasts toasts={toasts}/>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppInner />
+    </AuthProvider>
   );
 }
